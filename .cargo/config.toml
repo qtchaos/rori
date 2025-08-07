@@ -1,0 +1,13 @@
+[build]
+rustflags = ["-C", "target-cpu=native"]
+
+[target.'cfg(target_os = "linux")']
+linker = "clang"
+rustflags = [
+    "-C",
+    "target-cpu=native",
+    "-C",
+    "target-feature=+sse2,+sse3,+sse4.1,+sse4.2,+avx,+avx2",
+    "-C",
+    "link-arg=-fuse-ld=mold",
+]
