@@ -6,12 +6,19 @@ A highly multithreaded tool for deleting inactive chunks or regions in Minecraft
 
 These figures should be taken as a rough estimate, as performance can vary based on system configuration. I used a Ryzen 5 5500 (6 cores, 12 threads) with 32GB of RAM and an NVMe SSD capable of 7000 MB/s read and 5000 MB/s write speeds.
 
-| Tool           | Time (s) | Dry Run Time (s) | Regions Processed | Chunks Processed |
-| -------------- | -------- | ---------------- | ----------------- | ---------------- |
-| rori           | 11.14    | 12.81            | 1600              | 1620529          |
-| rori (regions) | 10.15    | 12.15            | 1600              | 1620529          |
-| PotatoPeeler   | 126.7    | 137.5            | 1600              | 1620529          |
-| ChunkCleaner   | N/A      | 610              | 1600              | 1620529          |
+### 1600 regions (1620529 chunks)
+
+| Tool           | Time (s) | Dry Run Time (s) | Threads | Chunks per Second |
+| -------------- | -------- | ---------------- | ------- | ----------------- |
+| rori (regions) | 10.15    | 12.15            | 12      | 159658            |
+| rori           | 11.14    | 12.81            | 12      | 145469            |
+| PotatoPeeler   | 126.7    | 137.5            | 12      | 12790             |
+| ChunkCleaner   | N/A      | 610              | N/A     | 2656              |
+
+## Chunk vs Region Mode
+
+<img src="https://raw.githubusercontent.com/qtchaos/rori/refs/heads/master/.github/assets/chunks.png" alt="Chunk Mode" width="200">
+<img src="https://raw.githubusercontent.com/qtchaos/rori/refs/heads/master/.github/assets/regions.png" alt="Region Mode" width="200">
 
 ## Arguments
 
