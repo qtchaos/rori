@@ -81,7 +81,7 @@ impl NbtTag {
 /// A zero-copy NBT reader that operates on a borrowed byte slice.
 /// Provides efficient reading and skipping operations for NBT data.
 pub struct NbtReader<'a> {
-    /// The remaining data to be read
+    /// The data slice to read from
     data: &'a [u8],
 }
 
@@ -90,7 +90,7 @@ impl<'a> NbtReader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
         Self { data }
     }
-    
+
     /// Get the current byte position in the original data slice.
     /// Useful for tracking how far into the data we've read.
     #[inline(always)]
@@ -198,7 +198,10 @@ impl<'a> NbtReader<'a> {
     #[inline(always)]
     pub fn skip_bytes(&mut self, count: usize) -> Result<(), NbtError> {
         if self.data.len() < count {
-            return Err(NbtError::InvalidFormat("Unexpected EOF".into()));
+            return Err(NbtError::IoError(std::io::Error::new(
+                ErrorKind::UnexpectedEof,
+                "Unexpected EOF",
+            )));
         }
         unsafe {
             self.data = self.data.get_unchecked(count..);
@@ -235,22 +238,55 @@ impl<'a> NbtReader<'a> {
                 self.read_f64_be()?;
             }
             NbtTag::ByteArray => {
-                let length = self.read_i32_be()? as usize;
-                self.skip_bytes(length)?;
+                let length = self.read_i32_be()?;
+                if length < 0 {
+                    return Err(NbtError::InvalidFormat(format!(
+                        "Negative array length: {}",
+                        length
+                    )));
+                }
+                self.skip_bytes(length as usize)?;
             }
             NbtTag::String => {
                 self.skip_string()?;
             }
             NbtTag::List => {
                 let list_type = NbtTag::from_u8(self.read_u8()?)?;
-                let length = self.read_i32_be()? as usize;
+                let length = self.read_i32_be()?;
+                if length < 0 {
+                    return Err(NbtError::InvalidFormat(format!(
+                        "Negative list length: {}",
+                        length
+                    )));
+                }
+                let length = length as usize;
                 match list_type {
                     NbtTag::Byte => self.skip_bytes(length)?,
-                    NbtTag::Short => self.skip_bytes(length * 2)?,
-                    NbtTag::Int => self.skip_bytes(length * 4)?,
-                    NbtTag::Long => self.skip_bytes(length * 8)?,
-                    NbtTag::Float => self.skip_bytes(length * 4)?,
-                    NbtTag::Double => self.skip_bytes(length * 8)?,
+                    NbtTag::Short => self.skip_bytes(
+                        length
+                            .checked_mul(2)
+                            .ok_or(NbtError::InvalidFormat("List size overflow".into()))?,
+                    )?,
+                    NbtTag::Int => self.skip_bytes(
+                        length
+                            .checked_mul(4)
+                            .ok_or(NbtError::InvalidFormat("List size overflow".into()))?,
+                    )?,
+                    NbtTag::Long => self.skip_bytes(
+                        length
+                            .checked_mul(8)
+                            .ok_or(NbtError::InvalidFormat("List size overflow".into()))?,
+                    )?,
+                    NbtTag::Float => self.skip_bytes(
+                        length
+                            .checked_mul(4)
+                            .ok_or(NbtError::InvalidFormat("List size overflow".into()))?,
+                    )?,
+                    NbtTag::Double => self.skip_bytes(
+                        length
+                            .checked_mul(8)
+                            .ok_or(NbtError::InvalidFormat("List size overflow".into()))?,
+                    )?,
                     // Less common cases
                     _ => {
                         if length > 0 {
@@ -265,12 +301,32 @@ impl<'a> NbtReader<'a> {
                 self.skip_compound()?;
             }
             NbtTag::IntArray => {
-                let length = self.read_i32_be()? as usize;
-                self.skip_bytes(length * 4)?;
+                let length = self.read_i32_be()?;
+                if length < 0 {
+                    return Err(NbtError::InvalidFormat(format!(
+                        "Negative array length: {}",
+                        length
+                    )));
+                }
+                self.skip_bytes(
+                    (length as usize)
+                        .checked_mul(4)
+                        .ok_or(NbtError::InvalidFormat("Array size overflow".into()))?,
+                )?;
             }
             NbtTag::LongArray => {
-                let length = self.read_i32_be()? as usize;
-                self.skip_bytes(length * 8)?;
+                let length = self.read_i32_be()?;
+                if length < 0 {
+                    return Err(NbtError::InvalidFormat(format!(
+                        "Negative array length: {}",
+                        length
+                    )));
+                }
+                self.skip_bytes(
+                    (length as usize)
+                        .checked_mul(8)
+                        .ok_or(NbtError::InvalidFormat("Array size overflow".into()))?,
+                )?;
             }
             NbtTag::End => {
                 // TAG_END has no data
@@ -378,7 +434,8 @@ impl<'a> NbtReader<'a> {
     /// # Returns
     /// A tuple of (Option<i64>, usize) where:
     /// - First element is the field value if found
-    /// - Second element is the byte position where the value was found (0 if not found)
+    /// - Second element is the byte position where the value data starts in the original buffer (0 if not found)
+    ///   This position points to the beginning of the value bytes, before they are read.
     pub fn search_compound_for_field(
         &mut self,
         field_name: &[u8],
@@ -399,7 +456,7 @@ impl<'a> NbtReader<'a> {
             } else {
                 // Found the target field, record position before reading value
                 let position = self.position(original_data);
-                
+
                 // Read its value
                 let result = match tag_type {
                     NbtTag::Long => Ok((Some(self.read_i64_be()?), position)),
@@ -411,7 +468,7 @@ impl<'a> NbtReader<'a> {
                         tag_type
                     ))),
                 };
-                
+
                 return result;
             }
         }

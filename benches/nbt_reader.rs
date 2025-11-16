@@ -81,8 +81,10 @@ fn bench_nbt_reader_search(c: &mut Criterion) {
 
             // Search for InhabitedTime
             const INHABITED_TIME: &[u8] = b"InhabitedTime";
-            // pass an empty byte slice as the second argument (no starting field)
-            reader.search_compound_for_field(INHABITED_TIME, b"").unwrap()
+            // pass the original data buffer as the second argument for position tracking
+            reader
+                .search_compound_for_field(INHABITED_TIME, black_box(&chunk_data))
+                .unwrap()
         });
     });
 }

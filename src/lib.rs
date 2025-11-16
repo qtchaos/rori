@@ -285,7 +285,7 @@ impl PositionStats {
         self.sum_positions += position;
         self.count += 1;
     }
-    
+
     fn merge(&mut self, other: &PositionStats) {
         if other.count == 0 {
             return;
@@ -304,7 +304,7 @@ impl PositionStats {
             self.count += other.count;
         }
     }
-    
+
     fn average(&self) -> usize {
         if self.count == 0 {
             0
@@ -439,126 +439,162 @@ fn process_region(
     let mut deleted_count = 0;
     let mut position_stats = PositionStats::default();
 
-    if let Ok(mmap) = unsafe { MmapOptions::new().map(&file) } {
+    // If mmap fails OR any access violations occur (caught by fallback to fastanvil),
+    // we gracefully degrade to buffered I/O. In production, ensure exclusive access
+    // to region files during processing.
+    let mmap_result = unsafe {
+        let mut opts = MmapOptions::new();
+
+        // On Linux, populate pages during mapping to catch truncation/SIGBUS early.
+        // This trades slightly slower mmap() for safer access and better error handling.
+        #[cfg(target_os = "linux")]
+        opts.populate();
+
+        opts.map(&file)
+    };
+
+    if let Ok(mmap) = mmap_result {
         let data: &[u8] = &mmap[..];
 
-        // Collect chunk metadata (coordinates + compressed data location)
-        let mut chunk_infos: Vec<ChunkMetadata> = Vec::new();
+        // Validate minimum size and accessibility before proceeding.
+        // Region files must have at least 8 KiB (4 KiB header + 4 KiB timestamps)
+        // This helps catch truncation/corruption early before SIGBUS occurs.
+        if data.len() >= 8192 && !data.is_empty() {
+            // Collect chunk metadata (coordinates + compressed data location)
+            let mut chunk_infos: Vec<ChunkMetadata> = Vec::new();
 
-        // Parse region header: 1024 u32 big-endian offsets (4 KiB total)
-        for x in 0..REGION_SIZE {
-            for z in 0..REGION_SIZE {
-                let idx = x + z * REGION_SIZE;
-                let header_offset = idx * 4;
-                if header_offset + 4 > data.len() {
-                    continue;
-                }
-                let raw = u32::from_be_bytes([
-                    data[header_offset],
-                    data[header_offset + 1],
-                    data[header_offset + 2],
-                    data[header_offset + 3],
-                ]);
-                let sector = raw >> 8;
-                if sector == 0 {
-                    continue;
-                }
-                let byte_offset = (sector as usize) * SECTOR_SIZE;
-                if byte_offset + 4 > data.len() {
-                    continue;
-                }
-                let length = u32::from_be_bytes([
-                    data[byte_offset],
-                    data[byte_offset + 1],
-                    data[byte_offset + 2],
-                    data[byte_offset + 3],
-                ]) as usize;
-                if length == 0 || byte_offset + 4 + length > data.len() {
-                    continue;
-                }
-
-                // compression type is the first byte after length
-                let compression_type = data[byte_offset + 4];
-                let data_start = byte_offset + 5;
-                let data_end = byte_offset + 4 + length;
-                if data_end > data.len() || data_start > data_end {
-                    continue;
-                }
-
-                chunk_infos.push(ChunkMetadata {
-                    x,
-                    z,
-                    compression_type,
-                    data_start,
-                    data_end,
-                });
-            }
-        }
-
-        // Parallel decompression + parsing of all chunks
-        let results: Vec<_> = chunk_infos
-            .into_par_iter()
-            .filter_map(|chunk_info| {
-                let compressed_data = &data[chunk_info.data_start..chunk_info.data_end];
-
-                // Parse compression type
-                let compression = match CompressionType::from_byte(chunk_info.compression_type) {
-                    Ok(c) => c,
-                    Err(_) => return None,
-                };
-
-                // Try partial decompression first (if configured)
-                let mut decompressed = match decompress_chunk(
-                    compression,
-                    compressed_data,
-                    options.max_decompression_bytes,
-                ) {
-                    Ok(v) => v,
-                    Err(_) => return None, // skip on decompression error
-                };
-
-                // Parse NBT to extract inhabited time
-                let mut inhabited_time = extract_inhabited_time(&decompressed);
-
-                // If parsing failed and we used partial decompression, retry with full decompression
-                if inhabited_time.is_err() && options.max_decompression_bytes > 0 {
-                    if let Ok(full_decomp) = decompress_full(compression, compressed_data) {
-                        decompressed = full_decomp;
-                        inhabited_time = extract_inhabited_time(&decompressed);
+            // Parse region header: 1024 u32 big-endian offsets (4 KiB total)
+            for x in 0..REGION_SIZE {
+                for z in 0..REGION_SIZE {
+                    let idx = x + z * REGION_SIZE;
+                    let header_offset = idx * 4;
+                    if header_offset + 4 > data.len() {
+                        continue;
                     }
+                    let raw = u32::from_be_bytes([
+                        data[header_offset],
+                        data[header_offset + 1],
+                        data[header_offset + 2],
+                        data[header_offset + 3],
+                    ]);
+                    let sector = raw >> 8;
+                    if sector == 0 {
+                        continue;
+                    }
+                    let byte_offset = (sector as usize) * SECTOR_SIZE;
+                    if byte_offset + 4 > data.len() {
+                        continue;
+                    }
+                    let length = u32::from_be_bytes([
+                        data[byte_offset],
+                        data[byte_offset + 1],
+                        data[byte_offset + 2],
+                        data[byte_offset + 3],
+                    ]) as usize;
+                    if length == 0 || byte_offset + 4 + length > data.len() {
+                        continue;
+                    }
+
+                    // compression type is the first byte after length
+                    let compression_type = data[byte_offset + 4];
+                    let data_start = byte_offset + 5;
+                    let data_end = byte_offset + 4 + length;
+                    if data_end > data.len() || data_start > data_end {
+                        continue;
+                    }
+
+                    chunk_infos.push(ChunkMetadata {
+                        x,
+                        z,
+                        compression_type,
+                        data_start,
+                        data_end,
+                    });
                 }
+            }
 
-                let inhabited_time = match inhabited_time {
-                    Ok(t) => t,
-                    Err(_) => return None,
-                };
+            // Parallel decompression + parsing of all chunks
+            let results: Vec<_> = chunk_infos
+                .into_par_iter()
+                .filter_map(|chunk_info| {
+                    let compressed_data = &data[chunk_info.data_start..chunk_info.data_end];
 
-                Some((chunk_info.x, chunk_info.z, decompressed, inhabited_time))
-            })
-            .collect();
+                    // Parse compression type
+                    let compression = match CompressionType::from_byte(chunk_info.compression_type)
+                    {
+                        Ok(c) => c,
+                        Err(_) => return None,
+                    };
 
-        // Aggregate results
-        for (x, z, decompressed, (inhabited_time_value, position)) in results {
-            chunk_stats.total_chunks += 1;
+                    // Try partial decompression first (if configured)
+                    let mut decompressed = match decompress_chunk(
+                        compression,
+                        compressed_data,
+                        options.max_decompression_bytes,
+                    ) {
+                        Ok(v) => v,
+                        Err(_) => return None, // skip on decompression error
+                    };
 
-            if let Some(time) = inhabited_time_value {
-                if time > options.inhabited_time_threshold as i64 {
-                    chunk_stats.inhabited_chunks += 1;
-                    chunks[x][z] = Some(decompressed);
-                    
-                    // Track position statistics
-                    if position > 0 {
-                        position_stats.update(position);
+                    // Parse NBT to extract inhabited time
+                    let mut inhabited_time = extract_inhabited_time(&decompressed);
+
+                    // If parsing failed and we used partial decompression, retry with full decompression
+                    if inhabited_time.is_err() && options.max_decompression_bytes != 0 {
+                        if let Ok(full_decomp) = decompress_full(compression, compressed_data) {
+                            decompressed = full_decomp;
+                            inhabited_time = extract_inhabited_time(&decompressed);
+                        }
+                    }
+
+                    let inhabited_time = match inhabited_time {
+                        Ok(t) => t,
+                        Err(_) => return None,
+                    };
+
+                    Some((chunk_info.x, chunk_info.z, decompressed, inhabited_time))
+                })
+                .collect();
+
+            // Aggregate results
+            for (x, z, decompressed, (inhabited_time_value, position)) in results {
+                chunk_stats.total_chunks += 1;
+
+                if let Some(time) = inhabited_time_value {
+                    if time > options.inhabited_time_threshold as i64 {
+                        chunk_stats.inhabited_chunks += 1;
+                        chunks[x][z] = Some(decompressed);
+
+                        // Track position statistics
+                        if position > 0 {
+                            position_stats.update(position);
+                        }
+                    } else {
+                        deleted_count += 1;
                     }
                 } else {
                     deleted_count += 1;
                 }
-            } else {
-                deleted_count += 1;
             }
+        } else {
+            // File too small or empty - log warning and fall back
+            warn!(
+                "Memory-mapped region file is too small or empty (size: {} bytes), \
+                 falling back to buffered I/O: {}",
+                data.len(),
+                region_path.display()
+            );
         }
     } else {
-        // Fallback: use fastanvil region reader (keeps previous behavior)
+        // mmap failed - fall back silently (common on some filesystems)
+        debug!(
+            "Memory mapping failed for {}, using buffered I/O",
+            region_path.display()
+        );
+    }
+
+    // Fallback: use fastanvil region reader if mmap failed or data was invalid
+    if chunk_stats.total_chunks == 0 {
         let file2 = fs::File::open(region_path)?;
         let mut mca = fastanvil::Region::from_stream(BufReader::new(file2)).map_err(|e| {
             ProcessError::RegionError(format!(
@@ -574,15 +610,16 @@ fn process_region(
                 if let Ok(Some(chunk_data)) = mca.read_chunk(x, z) {
                     chunk_stats.total_chunks += 1;
 
-                    let (inhabited_time_value, position) = extract_inhabited_time(&chunk_data).map_err(|e| {
-                        ProcessError::ChunkError(format!("Failed to process chunk: {}", e))
-                    })?;
+                    let (inhabited_time_value, position) = extract_inhabited_time(&chunk_data)
+                        .map_err(|e| {
+                            ProcessError::ChunkError(format!("Failed to process chunk: {}", e))
+                        })?;
 
                     if let Some(time) = inhabited_time_value {
                         if time > options.inhabited_time_threshold as i64 {
                             chunk_stats.inhabited_chunks += 1;
                             chunks[x][z] = Some(chunk_data.to_vec());
-                            
+
                             // Track position statistics
                             if position > 0 {
                                 position_stats.update(position);

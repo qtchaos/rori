@@ -1,7 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use std::fs;
 
-use rori::{decompress_chunk, decompress_full, CompressionType};
+use rori::{CompressionType, decompress_chunk, decompress_full};
 
 /// Load compressed chunk data from a region file
 fn load_compressed_chunks() -> Vec<(String, Vec<u8>, u8)> {
@@ -74,82 +74,79 @@ fn load_compressed_chunks() -> Vec<(String, Vec<u8>, u8)> {
 
 fn bench_decompress_full(c: &mut Criterion) {
     let chunks = load_compressed_chunks();
-    
+
     let mut group = c.benchmark_group("decompress_full");
-    
+
     for (name, compressed_data, compression_type) in &chunks {
         let compression = CompressionType::from_byte(*compression_type).unwrap();
-        
+
         group.bench_with_input(
             BenchmarkId::from_parameter(name),
             compressed_data,
             |b, data| {
-                b.iter(|| {
-                    black_box(decompress_full(compression, black_box(data)).unwrap())
-                });
+                b.iter(|| black_box(decompress_full(compression, black_box(data)).unwrap()));
             },
         );
     }
-    
+
     group.finish();
-}fn bench_decompress_partial(c: &mut Criterion) {
+}
+fn bench_decompress_partial(c: &mut Criterion) {
     let chunks = load_compressed_chunks();
-    
+
     // Test different partial decompression sizes
     let partial_sizes = [512, 1024, 2048, 4096];
-    
+
     for partial_size in partial_sizes {
         let mut group = c.benchmark_group(format!("decompress_partial_{}b", partial_size));
-        
+
         for (name, compressed_data, compression_type) in &chunks {
             let compression = CompressionType::from_byte(*compression_type).unwrap();
-            
+
             group.bench_with_input(
                 BenchmarkId::from_parameter(name),
                 compressed_data,
                 |b, data| {
                     b.iter(|| {
-                        black_box(decompress_chunk(compression, black_box(data), partial_size).unwrap())
+                        black_box(
+                            decompress_chunk(compression, black_box(data), partial_size).unwrap(),
+                        )
                     });
                 },
             );
         }
-        
+
         group.finish();
     }
 }
 
 fn bench_partial_vs_full_comparison(c: &mut Criterion) {
     let chunks = load_compressed_chunks();
-    
+
     let mut group = c.benchmark_group("partial_vs_full_comparison");
-    
+
     for (name, compressed_data, compression_type) in &chunks {
         let compression = CompressionType::from_byte(*compression_type).unwrap();
-        
+
         // Full decompression
         group.bench_with_input(
             BenchmarkId::new("full", name),
             compressed_data,
             |b, data| {
-                b.iter(|| {
-                    black_box(decompress_full(compression, black_box(data)).unwrap())
-                });
+                b.iter(|| black_box(decompress_full(compression, black_box(data)).unwrap()));
             },
         );
-        
+
         // Partial decompression (1KB - your current default)
         group.bench_with_input(
             BenchmarkId::new("partial_1kb", name),
             compressed_data,
             |b, data| {
-                b.iter(|| {
-                    black_box(decompress_chunk(compression, black_box(data), 1024).unwrap())
-                });
+                b.iter(|| black_box(decompress_chunk(compression, black_box(data), 1024).unwrap()));
             },
         );
     }
-    
+
     group.finish();
 }
 
@@ -161,7 +158,7 @@ criterion_group! {
         .sample_size(200)           // More samples = better statistics (default: 100)
         .measurement_time(std::time::Duration::from_secs(10))  // Longer measurement (default: 5s)
         .warm_up_time(std::time::Duration::from_secs(3));      // Longer warm-up (default: 3s)
-    targets = 
+    targets =
         bench_decompress_full,
         bench_decompress_partial,
         bench_partial_vs_full_comparison
