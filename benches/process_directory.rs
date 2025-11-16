@@ -18,13 +18,25 @@ fn bench_dry_process_directory(c: &mut Criterion) {
 
     c.bench_function("process_directory_partial_1kb", |b| {
         b.iter(|| {
-            process_directory(path, dry_run, inhabited_time, false, 1024).unwrap();
+            let options = rori::ProcessingOptions {
+                dry_run,
+                inhabited_time_threshold: inhabited_time,
+                delete_entire_regions: false,
+                max_decompression_bytes: 1024,
+            };
+            process_directory(path, &options).unwrap();
         });
     });
 
     c.bench_function("process_directory_full", |b| {
         b.iter(|| {
-            process_directory(path, dry_run, inhabited_time, false, 0).unwrap();
+            let options = rori::ProcessingOptions {
+                dry_run,
+                inhabited_time_threshold: inhabited_time,
+                delete_entire_regions: false,
+                max_decompression_bytes: 0,
+            };
+            process_directory(path, &options).unwrap();
         });
     });
 }

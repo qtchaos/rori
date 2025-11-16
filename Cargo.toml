@@ -37,3 +37,11 @@ codegen-units = 1
 [[bench]]
 name = "process_directory"
 harness = false
+
+[[bench]]
+name = "nbt_reader"
+harness = false
+
+[[bench]]
+name = "decompress_chunk"
+harness = false

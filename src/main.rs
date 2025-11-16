@@ -2,7 +2,7 @@ use std::{path::PathBuf, process};
 
 use clap::Parser;
 use log::{debug, error, info, warn};
-use rori::process_directory;
+use rori::{ProcessingOptions, process_directory};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -22,7 +22,8 @@ struct Args {
     #[arg(short, long, default_value_t = num_cpus::get())]
     threads: usize,
 
-    /// The cumulative number of ticks players have been a chunk.
+    /// The cumulative number of ticks players have been in a chunk.
+    /// Chunks with InhabitedTime below this threshold will be deleted.
     #[arg(short, long, default_value_t = 100)]
     inhabited_time: u32,
 
@@ -78,18 +79,54 @@ fn main() {
     // Start timing
     let start = std::time::Instant::now();
 
-    if let Err(e) = process_directory(
-        &args.path,
-        args.dry_run,
-        args.inhabited_time,
-        args.delete_regions,
-        args.decomp_size,
-    ) {
-        error!("Processing failed: {}", e);
-        process::exit(1);
-    }
+    let options = ProcessingOptions {
+        dry_run: args.dry_run,
+        inhabited_time_threshold: args.inhabited_time,
+        delete_entire_regions: args.delete_regions,
+        max_decompression_bytes: args.decomp_size,
+    };
+
+    let result = match process_directory(&args.path, &options) {
+        Ok(result) => result,
+        Err(e) => {
+            error!("Processing failed: {}", e);
+            process::exit(1);
+        }
+    };
 
     let duration = start.elapsed();
+    
+    info!(
+        "Total processed: {} regions, {} chunks",
+        result.total_regions, result.total_chunks
+    );
+    
+    let inhabited_percentage = if result.total_chunks > 0 {
+        (result.inhabited_chunks as f64) / result.total_chunks as f64 * 100.0
+    } else {
+        0.0
+    };
+    
+    info!(
+        "Inhabited chunks: {} ({:.1}%)",
+        result.inhabited_chunks, inhabited_percentage
+    );
+
+    if result.deleted_regions > 0 {
+        info!("Deleted regions: {}", result.deleted_regions);
+    }
+    
+    // Report InhabitedTime position statistics
+    if result.position_count > 0 {
+        debug!(
+            "InhabitedTime position stats: min={}B, max={}B, avg={}B (n={})",
+            result.min_position,
+            result.max_position,
+            result.avg_position,
+            result.position_count
+        );
+    }
+
     info!("Processing completed in {:.2?}", duration);
 }
 
