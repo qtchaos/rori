@@ -30,9 +30,8 @@ struct Args {
     #[arg(long)]
     delete_regions: bool,
 
-    /// Maximum size to decompress from each chunk in bytes (0 = full decompression)
-    /// Use smaller values like 32768 (32KB) to only read NBT headers
-    #[arg(long, default_value_t = 0)]
+    /// Max bytes to decompress per chunk (0 = full, auto-fallback on parse failure)
+    #[arg(long, default_value_t = 1024)]
     decomp_size: usize,
 }
 
