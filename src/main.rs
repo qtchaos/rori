@@ -32,7 +32,7 @@ struct Args {
     delete_regions: bool,
 
     /// Max bytes to decompress per chunk (0 = full, auto-fallback on parse failure)
-    #[arg(long, default_value_t = 1024)]
+    #[arg(long, default_value_t = 512)]
     decomp_size: usize,
 }
 
