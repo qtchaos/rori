@@ -10,8 +10,8 @@ These figures should be taken as a rough estimate, as performance can vary based
 
 | Tool           | Time (s) | Dry Run Time (s) | Threads | Chunks per Second |
 | -------------- | -------- | ---------------- | ------- | ----------------- |
-| rori (regions) | 10.15    | 12.15            | 12      | 159658            |
-| rori           | 11.14    | 12.81            | 12      | 145469            |
+| rori (regions) | 6.7      | 6.01             | 12      | 241870            |
+| rori           | 7.77     | 5.94             | 12      | 208562            |
 | PotatoPeeler   | 126.7    | 137.5            | 12      | 12790             |
 | ChunkCleaner   | N/A      | 610              | N/A     | 2656              |
 

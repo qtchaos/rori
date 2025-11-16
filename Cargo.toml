@@ -16,6 +16,7 @@ indicatif = "0.18.0"
 log = "0.4.27"
 num_cpus = "1.17.0"
 rayon = "1.10.0"
+memmap2 = "0.6.2"
 
 [profile.dev]
 debug = false
@@ -35,4 +36,12 @@ codegen-units = 1
 
 [[bench]]
 name = "process_directory"
+harness = false
+
+[[bench]]
+name = "nbt_reader"
+harness = false
+
+[[bench]]
+name = "decompress_chunk"
 harness = false
