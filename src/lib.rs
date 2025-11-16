@@ -2,13 +2,79 @@ mod parser;
 
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, error, info, trace, warn};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator, IntoParallelIterator};
 use std::{
+    cell::RefCell,
     fs,
-    io::BufReader,
+    io::{BufReader, Read, Cursor},
     path::{Path, PathBuf},
     time::Instant,
 };
+use memmap2::MmapOptions;
+use flate2::read::{ZlibDecoder, GzDecoder};
+
+thread_local! {
+    /// Thread-local decompression buffer pool (reuse across chunks)
+    static DECOMP_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(1_000_000));
+}
+
+/// Decompress a chunk's compressed bytes (from an mmap slice).
+/// ctype: 1 = GZip, 2 = Zlib/deflate
+/// chunk_size: max bytes to decompress, or 0 for full decompression
+/// Partial decompression is useful since we only need the NBT header.
+/// If partial decompression fails to parse, automatically retries with full decompression.
+fn decompress_chunk(ctype: u8, comp_slice: &[u8], chunk_size: usize) -> Result<Vec<u8>, ProcessError> {
+    if chunk_size == 0 {
+        // Full decompression requested
+        return decompress_full(ctype, comp_slice);
+    }
+    
+    // Try partial decompression first
+    let mut limited_buf = vec![0u8; chunk_size];
+    let bytes_read = match ctype {
+        1 => {
+            let mut dec = GzDecoder::new(Cursor::new(comp_slice));
+            dec.read(&mut limited_buf).map_err(|e| {
+                ProcessError::ChunkError(format!("decompression failed: {}", e))
+            })?
+        }
+        2 => {
+            let mut dec = ZlibDecoder::new(Cursor::new(comp_slice));
+            dec.read(&mut limited_buf).map_err(|e| {
+                ProcessError::ChunkError(format!("decompression failed: {}", e))
+            })?
+        }
+        _ => return Err(ProcessError::ChunkError("unknown compression type".into())),
+    };
+    
+    limited_buf.truncate(bytes_read);
+    Ok(limited_buf)
+}
+
+/// Full decompression using thread-local buffer
+fn decompress_full(ctype: u8, comp_slice: &[u8]) -> Result<Vec<u8>, ProcessError> {
+    DECOMP_BUF.with(|buf_cell| {
+        let mut buf = buf_cell.borrow_mut();
+        buf.clear();
+        
+        match ctype {
+            1 => {
+                let mut dec = GzDecoder::new(Cursor::new(comp_slice));
+                dec.read_to_end(&mut buf).map_err(|e| {
+                    ProcessError::ChunkError(format!("decompression failed: {}", e))
+                })?;
+            }
+            2 => {
+                let mut dec = ZlibDecoder::new(Cursor::new(comp_slice));
+                dec.read_to_end(&mut buf).map_err(|e| {
+                    ProcessError::ChunkError(format!("decompression failed: {}", e))
+                })?;
+            }
+            _ => return Err(ProcessError::ChunkError("unknown compression type".into())),
+        }
+        Ok(buf.clone())
+    })
+}
 
 #[derive(Debug)]
 pub enum ProcessError {
@@ -68,6 +134,7 @@ pub fn process_directory(
     dry_run: bool,
     inhabited_time: u32,
     delete_regions: bool,
+    chunk_size: usize,
 ) -> Result<(), ProcessError> {
     let start = Instant::now();
     let regions = find_region_files(path)?;
@@ -92,7 +159,7 @@ pub fn process_directory(
     let results: Vec<Result<RegionStats, ProcessError>> = regions
         .par_iter()
         .map(|region_path| {
-            let res = process_region(region_path, dry_run, inhabited_time, delete_regions);
+            let res = process_region(region_path, dry_run, inhabited_time, delete_regions, chunk_size);
             pb.inc(1);
             res
         })
@@ -151,39 +218,138 @@ fn process_region(
     dry_run: bool,
     threshold: u32,
     delete_regions: bool,
+    chunk_size: usize,
 ) -> Result<RegionStats, ProcessError> {
     trace!("Processing region: {}", region_path.display());
-
     let file = fs::File::open(region_path)?;
-    let reader = BufReader::new(file);
 
+    // prepare chunk storage
     let mut chunks: Vec<Vec<Option<Vec<u8>>>> = vec![vec![None; 32]; 32];
-    let mut mca = fastanvil::Region::from_stream(reader).map_err(|e| {
-        ProcessError::RegionError(format!(
-            "Failed to create region from {}: {}",
-            region_path.display(),
-            e
-        ))
-    })?;
 
+    // Try mmap and parse the region header directly. On failure, fall back to fastanvil.
     let mut chunk_stats = ChunkStats::default();
     let mut deleted_count = 0;
 
-    // First pass: determine which chunks to keep
-    for x in 0..32 {
-        for z in 0..32 {
-            if let Ok(Some(chunk_data)) = mca.read_chunk(x, z) {
-                chunk_stats.total_chunks += 1;
+    if let Ok(mmap) = unsafe { MmapOptions::new().map(&file) } {
+        let data: &[u8] = &mmap[..];
 
-                let inhabited_time = parser::process_chunk(&chunk_data).map_err(|e| {
-                    ProcessError::ChunkError(format!("Failed to process chunk: {}", e))
-                })?;
+        // Collect chunk metadata (coordinates + compressed slice info) first
+        let mut chunk_infos: Vec<(usize, usize, u8, usize, usize)> = Vec::new();
+        
+        // header: 1024 u32 big-endian offsets (4 KiB)
+        for x in 0..32 {
+            for z in 0..32 {
+                let idx = x + z * 32;
+                let header_off = idx * 4;
+                if header_off + 4 > data.len() {
+                    continue;
+                }
+                let raw = u32::from_be_bytes([
+                    data[header_off],
+                    data[header_off + 1],
+                    data[header_off + 2],
+                    data[header_off + 3],
+                ]);
+                let sector = raw >> 8;
+                if sector == 0 {
+                    continue;
+                }
+                let byte_off = (sector as usize) * 4096;
+                if byte_off + 4 > data.len() {
+                    continue;
+                }
+                let length = u32::from_be_bytes([
+                    data[byte_off],
+                    data[byte_off + 1],
+                    data[byte_off + 2],
+                    data[byte_off + 3],
+                ]) as usize;
+                if length == 0 || byte_off + 4 + length > data.len() {
+                    continue;
+                }
 
-                if inhabited_time.is_some() && inhabited_time.unwrap() > threshold as i64 {
-                    chunk_stats.inhabited_chunks += 1;
-                    chunks[x][z] = Some(chunk_data.clone());
-                } else {
-                    deleted_count += 1;
+                // compression type is the first byte after length
+                let ctype = data[byte_off + 4];
+                let comp_start = byte_off + 5;
+                let comp_end = byte_off + 4 + length;
+                if comp_end > data.len() || comp_start > comp_end {
+                    continue;
+                }
+                
+                chunk_infos.push((x, z, ctype, comp_start, comp_end));
+            }
+        }
+
+        // Parallel decompression + parsing of all chunks
+        let results: Vec<_> = chunk_infos
+            .into_par_iter()
+            .filter_map(|(x, z, ctype, comp_start, comp_end)| {
+                let comp_slice = &data[comp_start..comp_end];
+                
+                // Try partial decompression first (if configured)
+                let mut decompressed = match decompress_chunk(ctype, comp_slice, chunk_size) {
+                    Ok(v) => v,
+                    Err(_) => return None, // skip on decompression error
+                };
+
+                // Parse NBT to extract inhabited time
+                let mut inhabited_time = parser::process_chunk(&decompressed);
+                
+                // If parsing failed and we used partial decompression, retry with full decompression
+                if inhabited_time.is_err() && chunk_size > 0 {
+                    if let Ok(full_decomp) = decompress_full(ctype, comp_slice) {
+                        decompressed = full_decomp;
+                        inhabited_time = parser::process_chunk(&decompressed);
+                    }
+                }
+                
+                let inhabited_time = match inhabited_time {
+                    Ok(t) => t,
+                    Err(_) => return None,
+                };
+
+                Some((x, z, decompressed, inhabited_time))
+            })
+            .collect();
+
+        // Aggregate results
+        for (x, z, decompressed, inhabited_time) in results {
+            chunk_stats.total_chunks += 1;
+            
+            if inhabited_time.is_some() && inhabited_time.unwrap() > threshold as i64 {
+                chunk_stats.inhabited_chunks += 1;
+                chunks[x][z] = Some(decompressed);
+            } else {
+                deleted_count += 1;
+            }
+        }
+    } else {
+        // Fallback: use fastanvil region reader (keeps previous behavior)
+        let file2 = fs::File::open(region_path)?;
+        let mut mca = fastanvil::Region::from_stream(BufReader::new(file2)).map_err(|e| {
+            ProcessError::RegionError(format!(
+                "Failed to create region from {}: {}",
+                region_path.display(),
+                e
+            ))
+        })?;
+
+        // First pass: determine which chunks to keep
+        for x in 0..32 {
+            for z in 0..32 {
+                if let Ok(Some(chunk_data)) = mca.read_chunk(x, z) {
+                    chunk_stats.total_chunks += 1;
+
+                    let inhabited_time = parser::process_chunk(&chunk_data).map_err(|e| {
+                        ProcessError::ChunkError(format!("Failed to process chunk: {}", e))
+                    })?;
+
+                    if inhabited_time.is_some() && inhabited_time.unwrap() > threshold as i64 {
+                        chunk_stats.inhabited_chunks += 1;
+                        chunks[x][z] = Some(chunk_data.to_vec());
+                    } else {
+                        deleted_count += 1;
+                    }
                 }
             }
         }
@@ -247,5 +413,6 @@ fn process_region(
     }
 
     trace!("Region {} stats: {:?}", region_path.display(), region_stats);
+
     Ok(region_stats)
 }

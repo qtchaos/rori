@@ -273,7 +273,7 @@ fn skip_compound(reader: &mut &[u8]) -> Result<(), NbtError> {
 }
 
 #[inline(always)]
-fn ensure_len(p: &mut &[u8], need: usize) -> Result<(), NbtError> {
+fn ensure_len(p: &[u8], need: usize) -> Result<(), NbtError> {
     if p.len() < need {
         return Err(NbtError::IoError(std::io::Error::new(
             ErrorKind::UnexpectedEof,

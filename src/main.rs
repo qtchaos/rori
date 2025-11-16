@@ -29,6 +29,11 @@ struct Args {
     /// Delete entire regions instead of individual chunks when no inhabited chunks exist
     #[arg(long)]
     delete_regions: bool,
+
+    /// Maximum size to decompress from each chunk in bytes (0 = full decompression)
+    /// Use smaller values like 32768 (32KB) to only read NBT headers
+    #[arg(long, default_value_t = 0)]
+    decomp_size: usize,
 }
 
 fn main() {
@@ -79,6 +84,7 @@ fn main() {
         args.dry_run,
         args.inhabited_time,
         args.delete_regions,
+        args.decomp_size,
     ) {
         error!("Processing failed: {}", e);
         process::exit(1);

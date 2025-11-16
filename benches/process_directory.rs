@@ -16,9 +16,15 @@ fn bench_dry_process_directory(c: &mut Criterion) {
             warn!("Failed to set thread pool size: {}, using default", e);
         });
 
-    c.bench_function("process_directory", |b| {
+    c.bench_function("process_directory_partial_1kb", |b| {
         b.iter(|| {
-            process_directory(path, dry_run, inhabited_time, false).unwrap();
+            process_directory(path, dry_run, inhabited_time, false, 1024).unwrap();
+        });
+    });
+
+    c.bench_function("process_directory_full", |b| {
+        b.iter(|| {
+            process_directory(path, dry_run, inhabited_time, false, 0).unwrap();
         });
     });
 }
