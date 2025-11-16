@@ -93,6 +93,8 @@ pub struct ProcessingOptions {
 thread_local! {
     /// Thread-local decompression buffer pool (reuse across chunks)
     static DECOMP_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(1_000_000));
+    /// Thread-local partial decompression buffer (reuse for partial decompressions)
+    static PARTIAL_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(8192));
 }
 
 /// Compression types used in Minecraft region files.
@@ -137,25 +139,36 @@ pub fn decompress_chunk(
         return decompress_full(compression, compressed_data);
     }
 
-    // Try partial decompression first
-    let mut buffer = vec![0u8; max_bytes];
-    let bytes_read = match compression {
-        CompressionType::GZip => {
-            let mut decoder = GzDecoder::new(Cursor::new(compressed_data));
-            decoder.read(&mut buffer).map_err(|e| {
-                ProcessError::ChunkError(format!("GZip decompression failed: {}", e))
-            })?
+    // Try partial decompression using thread-local buffer
+    PARTIAL_BUF.with(|buf_cell| {
+        let mut buf = buf_cell.borrow_mut();
+        
+        // Ensure buffer has the right capacity
+        let current_capacity = buf.capacity();
+        if current_capacity < max_bytes {
+            buf.reserve(max_bytes - current_capacity);
         }
-        CompressionType::Zlib => {
-            let mut decoder = ZlibDecoder::new(Cursor::new(compressed_data));
-            decoder.read(&mut buffer).map_err(|e| {
-                ProcessError::ChunkError(format!("Zlib decompression failed: {}", e))
-            })?
-        }
-    };
+        buf.clear();
+        buf.resize(max_bytes, 0);
+        
+        let bytes_read = match compression {
+            CompressionType::GZip => {
+                let mut decoder = GzDecoder::new(Cursor::new(compressed_data));
+                decoder.read(&mut buf).map_err(|e| {
+                    ProcessError::ChunkError(format!("GZip decompression failed: {}", e))
+                })?
+            }
+            CompressionType::Zlib => {
+                let mut decoder = ZlibDecoder::new(Cursor::new(compressed_data));
+                decoder.read(&mut buf).map_err(|e| {
+                    ProcessError::ChunkError(format!("Zlib decompression failed: {}", e))
+                })?
+            }
+        };
 
-    buffer.truncate(bytes_read);
-    Ok(buffer)
+        buf.truncate(bytes_read);
+        Ok(buf.clone())
+    })
 }
 
 /// Decompress chunk data fully using thread-local buffer for efficiency.
@@ -461,7 +474,8 @@ fn process_region(
         // This helps catch truncation/corruption early before SIGBUS occurs.
         if data.len() >= 8192 && !data.is_empty() {
             // Collect chunk metadata (coordinates + compressed data location)
-            let mut chunk_infos: Vec<ChunkMetadata> = Vec::new();
+            // Pre-allocate with estimated capacity for better performance
+            let mut chunk_infos: Vec<ChunkMetadata> = Vec::with_capacity(256);
 
             // Parse region header: 1024 u32 big-endian offsets (4 KiB total)
             for x in 0..REGION_SIZE {

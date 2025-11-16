@@ -216,26 +216,19 @@ impl<'a> NbtReader<'a> {
     }
 
     /// Skip over a tag value based on its type.
-    /// Handles all NBT tag types efficiently.
     pub fn skip_tag_value(&mut self, tag_type: NbtTag) -> Result<(), NbtError> {
         match tag_type {
             NbtTag::Byte => {
-                self.read_u8()?;
+                self.skip_bytes(1)?;
             }
             NbtTag::Short => {
-                self.read_u16_be()?;
+                self.skip_bytes(2)?;
             }
-            NbtTag::Int => {
-                self.read_u32_be()?;
+            NbtTag::Int | NbtTag::Float => {
+                self.skip_bytes(4)?;
             }
-            NbtTag::Long => {
-                self.read_u64_be()?;
-            }
-            NbtTag::Float => {
-                self.read_f32_be()?;
-            }
-            NbtTag::Double => {
-                self.read_f64_be()?;
+            NbtTag::Long | NbtTag::Double => {
+                self.skip_bytes(8)?;
             }
             NbtTag::ByteArray => {
                 let length = self.read_i32_be()?;
@@ -260,6 +253,7 @@ impl<'a> NbtReader<'a> {
                     )));
                 }
                 let length = length as usize;
+                
                 match list_type {
                     NbtTag::Byte => self.skip_bytes(length)?,
                     NbtTag::Short => self.skip_bytes(
@@ -267,32 +261,20 @@ impl<'a> NbtReader<'a> {
                             .checked_mul(2)
                             .ok_or(NbtError::InvalidFormat("List size overflow".into()))?,
                     )?,
-                    NbtTag::Int => self.skip_bytes(
+                    NbtTag::Int | NbtTag::Float => self.skip_bytes(
                         length
                             .checked_mul(4)
                             .ok_or(NbtError::InvalidFormat("List size overflow".into()))?,
                     )?,
-                    NbtTag::Long => self.skip_bytes(
+                    NbtTag::Long | NbtTag::Double => self.skip_bytes(
                         length
                             .checked_mul(8)
                             .ok_or(NbtError::InvalidFormat("List size overflow".into()))?,
                     )?,
-                    NbtTag::Float => self.skip_bytes(
-                        length
-                            .checked_mul(4)
-                            .ok_or(NbtError::InvalidFormat("List size overflow".into()))?,
-                    )?,
-                    NbtTag::Double => self.skip_bytes(
-                        length
-                            .checked_mul(8)
-                            .ok_or(NbtError::InvalidFormat("List size overflow".into()))?,
-                    )?,
-                    // Less common cases
+                    // Complex types need individual skipping
                     _ => {
-                        if length > 0 {
-                            for _ in 0..length {
-                                self.skip_tag_value(list_type)?;
-                            }
+                        for _ in 0..length {
+                            self.skip_tag_value(list_type)?;
                         }
                     }
                 }
@@ -352,7 +334,7 @@ impl<'a> NbtReader<'a> {
     }
 
     /// Check if the next string matches a target string without allocating.
-    /// Uses optimized u64 comparisons for fast matching.
+    /// Uses byte slice comparison for matching.
     /// Returns true if the string matches and advances the reader past it.
     ///
     /// # Arguments
@@ -366,62 +348,11 @@ impl<'a> NbtReader<'a> {
             return Ok(false);
         }
 
-        // For strings longer than 8 bytes, use optimized comparison
-        if target.len() >= 8 {
-            self.ensure_len(target.len())?;
-            let b = self.data;
-
-            // Compare in 8-byte chunks
-            let full_chunks = target.len() / 8;
-            for i in 0..full_chunks {
-                let offset = i * 8;
-                let chunk = u64::from_ne_bytes([
-                    b[offset],
-                    b[offset + 1],
-                    b[offset + 2],
-                    b[offset + 3],
-                    b[offset + 4],
-                    b[offset + 5],
-                    b[offset + 6],
-                    b[offset + 7],
-                ]);
-                let target_chunk = u64::from_ne_bytes([
-                    target[offset],
-                    target[offset + 1],
-                    target[offset + 2],
-                    target[offset + 3],
-                    target[offset + 4],
-                    target[offset + 5],
-                    target[offset + 6],
-                    target[offset + 7],
-                ]);
-                if chunk != target_chunk {
-                    self.data = &b[target.len()..];
-                    return Ok(false);
-                }
-            }
-
-            // Compare remaining bytes
-            let remaining = target.len() % 8;
-            if remaining > 0 {
-                let offset = full_chunks * 8;
-                for i in 0..remaining {
-                    if b[offset + i] != target[offset + i] {
-                        self.data = &b[target.len()..];
-                        return Ok(false);
-                    }
-                }
-            }
-
-            self.data = &b[target.len()..];
-            Ok(true)
-        } else {
-            // For short strings, simple byte comparison
-            self.ensure_len(length)?;
-            let matches = &self.data[..length] == target;
-            self.data = &self.data[length..];
-            Ok(matches)
-        }
+        self.ensure_len(length)?;
+        
+        let matches = &self.data[..length] == target;
+        self.data = &self.data[length..];
+        Ok(matches)
     }
 
     /// Search through a compound tag for a specific field at the current depth only.
