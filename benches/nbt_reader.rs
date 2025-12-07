@@ -2,7 +2,7 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::path::PathBuf;
 
 use rori::{
-    decompress::mmap_region,
+    decompress::{decompress, mmap_region},
     nbt::{NbtReader, NbtTag},
 };
 
@@ -14,11 +14,18 @@ fn load_sample_chunk() -> Vec<u8> {
     )
     .ok()
     .and_then(|region| {
+        let compression = region.compression;
         region
             .chunks
             .iter()
             .flat_map(|row| row.iter())
-            .find_map(|chunk| chunk.as_ref().and_then(|c| c.data.clone()))
+            .find_map(|chunk| {
+                chunk.as_ref().and_then(|c| {
+                    c.data
+                        .as_ref()
+                        .and_then(|compressed_data| decompress(compression, compressed_data).ok())
+                })
+            })
     })
     .unwrap_or_else(Vec::new)
 }
@@ -104,22 +111,28 @@ fn bench_nbt_skip_operations(c: &mut Criterion) {
         Err(_) => return,
     };
 
-    // Find a chunk with data
+    let compression = region_data.compression;
+
+    // Find a chunk with data and decompress it
     let chunk_data = region_data
         .chunks
         .iter()
         .flat_map(|row| row.iter())
-        .find_map(|chunk| chunk.as_ref().and_then(|c| c.data.as_ref()));
+        .find_map(|chunk| {
+            chunk.as_ref().and_then(|c| {
+                c.data
+                    .as_ref()
+                    .and_then(|compressed_data| decompress(compression, compressed_data).ok())
+            })
+        });
 
-    if chunk_data.is_none() {
+    let Some(chunk_data) = chunk_data else {
         return;
-    }
-
-    let chunk_data = chunk_data.unwrap();
+    };
 
     c.bench_function("nbt_skip_compound", |b| {
         b.iter(|| {
-            let mut reader = NbtReader::new(black_box(chunk_data));
+            let mut reader = NbtReader::new(black_box(&chunk_data));
 
             // Read root tag
             let tag_type = NbtTag::from_u8(reader.read_u8().unwrap()).unwrap();
