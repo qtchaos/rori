@@ -2,6 +2,12 @@
 name = "rori"
 version = "0.3.0"
 edition = "2024"
+readme = "README.md"
+description = "A highly multithreaded tool for deleting inactive chunks or regions in Minecraft worlds, focusing on performance and efficiency, designed to be used for large-scale world management."
+repository = "https://github.com/qtchaos/rori"
+license = "GNU General Public License v3.0 or later"
+keywords = ["minecraft", "nbt",]
+authors = ["chaos"]
 
 [dev-dependencies]
 criterion = { package = "codspeed-criterion-compat", version = "3.0.5" }
