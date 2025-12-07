@@ -2,7 +2,7 @@ use std::{path::PathBuf, process};
 
 use clap::Parser;
 use log::{debug, error, info, warn};
-use rori::{ProcessingOptions, process_directory};
+use rori::{Conf, process_directory};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -23,17 +23,17 @@ struct Args {
     threads: usize,
 
     /// The cumulative number of ticks players have been in a chunk.
-    /// Chunks with InhabitedTime below or equal to this threshold will be deleted.
+    /// Chunks with `InhabitedTime` below or equal to this threshold will be deleted.
     #[arg(short, long, default_value_t = 100)]
     inhabited_time: u32,
 
-    /// Delete entire regions instead of individual chunks when no inhabited chunks exist
+    /// If true, delete region instead of chunks
     #[arg(long)]
     delete_regions: bool,
 
-    /// Max bytes to decompress per chunk (0 = full, auto-fallback on parse failure)
-    #[arg(long, default_value_t = 512)]
-    decomp_size: usize,
+    /// No progress bar
+    #[arg(long)]
+    no_progress: bool,
 }
 
 fn main() {
@@ -58,7 +58,7 @@ fn main() {
 
     // Initialize logging
     if let Err(e) = init_logging(args.verbose) {
-        eprintln!("Failed to initialize logging: {}", e);
+        eprintln!("Failed to initialize logging: {e}");
         process::exit(1);
     }
 
@@ -67,7 +67,7 @@ fn main() {
         .num_threads(args.threads)
         .build_global()
         .unwrap_or_else(|e| {
-            warn!("Failed to set thread pool size: {}, using default", e);
+            warn!("Failed to set thread pool size: {e}, using default");
         });
 
     debug!(
@@ -79,52 +79,47 @@ fn main() {
     // Start timing
     let start = std::time::Instant::now();
 
-    let options = ProcessingOptions {
+    let config = Conf {
         dry_run: args.dry_run,
         inhabited_time_threshold: args.inhabited_time,
-        delete_entire_regions: args.delete_regions,
-        max_decompression_bytes: args.decomp_size,
+        delete_regions: args.delete_regions,
+        no_progress: args.no_progress,
     };
 
-    let result = match process_directory(&args.path, &options) {
+    let result = match process_directory(&args.path, &config) {
         Ok(result) => result,
         Err(e) => {
-            error!("Processing failed: {}", e);
+            error!("Processing failed: {e}");
             process::exit(1);
         }
     };
 
     let duration = start.elapsed();
-
     info!(
         "Total processed: {} regions, {} chunks",
-        result.total_regions, result.total_chunks
+        result.total_regions, result.total_chunk_stats.total
     );
 
-    let inhabited_percentage = if result.total_chunks > 0 {
-        (result.inhabited_chunks as f64) / result.total_chunks as f64 * 100.0
+    let inhabited_percentage = if result.total_chunk_stats.total > 0 {
+        (f64::from(result.total_chunk_stats.inhabited)) / f64::from(result.total_chunk_stats.total)
+            * 100.0
     } else {
         0.0
     };
 
     info!(
         "Inhabited chunks: {} ({:.1}%)",
-        result.inhabited_chunks, inhabited_percentage
+        result.total_chunk_stats.inhabited, inhabited_percentage
     );
 
     if result.deleted_regions > 0 {
         info!("Deleted regions: {}", result.deleted_regions);
     }
 
-    // Report InhabitedTime position statistics
-    if result.position_count > 0 {
-        debug!(
-            "InhabitedTime position stats: min={}B, max={}B, avg={}B (n={})",
-            result.min_position, result.max_position, result.avg_position, result.position_count
-        );
-    }
+    let chunks_per_second =
+        result.total_chunk_stats.total as f64 / duration.as_millis() as f64 * 1000.0;
 
-    info!("Processing completed in {:.2?}", duration);
+    info!("Completed in {duration:.2?}, {chunks_per_second:.0} chunks per second");
 }
 
 fn init_logging(verbose: u8) -> Result<(), Box<dyn std::error::Error>> {

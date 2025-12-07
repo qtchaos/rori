@@ -1,90 +1,43 @@
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use std::fs;
+use std::path::PathBuf;
 
-use rori::{CompressionType, decompress_chunk, decompress_full};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+
+use rori::{
+    Region,
+    decompress::{decompress, decompress_partial, mmap_region},
+};
 
 /// Load compressed chunk data from a region file
-fn load_compressed_chunks() -> Vec<(String, Vec<u8>, u8)> {
-    let region_path = "benches/test_data/region_small/r.0.0.mca";
-    let data = fs::read(region_path).expect("Failed to read region file");
-
-    let mut chunks = Vec::new();
-
-    // Parse region header and extract compressed chunks
-    for idx in 0..1024 {
-        let header_offset = idx * 4;
-        if header_offset + 4 > data.len() {
-            continue;
-        }
-
-        let raw = u32::from_be_bytes([
-            data[header_offset],
-            data[header_offset + 1],
-            data[header_offset + 2],
-            data[header_offset + 3],
-        ]);
-        let sector = raw >> 8;
-        if sector == 0 {
-            continue;
-        }
-
-        let byte_offset = (sector as usize) * 4096;
-        if byte_offset + 4 > data.len() {
-            continue;
-        }
-
-        let length = u32::from_be_bytes([
-            data[byte_offset],
-            data[byte_offset + 1],
-            data[byte_offset + 2],
-            data[byte_offset + 3],
-        ]) as usize;
-
-        if length == 0 || byte_offset + 4 + length > data.len() {
-            continue;
-        }
-
-        let compression_type = data[byte_offset + 4];
-        let compressed_data = data[byte_offset + 5..byte_offset + 4 + length].to_vec();
-
-        let name = match compression_type {
-            1 => format!(
-                "gzip_{}kb_chunk{}",
-                compressed_data.len() / 1024,
-                chunks.len()
-            ),
-            2 => format!(
-                "zlib_{}kb_chunk{}",
-                compressed_data.len() / 1024,
-                chunks.len()
-            ),
-            _ => continue,
-        };
-
-        chunks.push((name, compressed_data, compression_type));
-
-        // Collect a few chunks of different types
-        if chunks.len() >= 10 {
-            break;
-        }
-    }
-
-    chunks
+fn load_region() -> Option<Region> {
+    mmap_region(
+        &PathBuf::from("benches/test_data/region_small/r.0.0.mca"),
+        1,
+    )
+    .ok()
 }
 
 fn bench_decompress_full(c: &mut Criterion) {
-    let chunks = load_compressed_chunks();
+    let Some(region) = load_region() else {
+        eprintln!("Skipping bench_decompress_full: test data not found");
+        return;
+    };
+
+    let Some(Some(chunk)) = region.chunks.get(0).and_then(|row| row.get(0)) else {
+        eprintln!("Skipping bench_decompress_full: no chunks in test data");
+        return;
+    };
 
     let mut group = c.benchmark_group("decompress_full");
 
-    for (name, compressed_data, compression_type) in &chunks {
-        let compression = CompressionType::from_byte(*compression_type).unwrap();
+    if let Some(ref compressed_data) = chunk.data {
+        let name = format!("chunk_{}_{}", 0, 0);
+        let compression = region.compression;
 
         group.bench_with_input(
-            BenchmarkId::from_parameter(name),
+            BenchmarkId::from_parameter(&name),
             compressed_data,
             |b, data| {
-                b.iter(|| black_box(decompress_full(compression, black_box(data)).unwrap()));
+                b.iter(|| black_box(decompress(compression, black_box(data)).unwrap()));
             },
         );
     }
@@ -92,24 +45,33 @@ fn bench_decompress_full(c: &mut Criterion) {
     group.finish();
 }
 fn bench_decompress_partial(c: &mut Criterion) {
-    let chunks = load_compressed_chunks();
+    let Some(region) = load_region() else {
+        eprintln!("Skipping bench_decompress_partial: test data not found");
+        return;
+    };
+
+    let Some(Some(chunk)) = region.chunks.get(0).and_then(|row| row.get(0)) else {
+        eprintln!("Skipping bench_decompress_partial: no chunks in test data");
+        return;
+    };
 
     // Test different partial decompression sizes
-    let partial_sizes = [512, 1024, 2048, 4096];
+    let partial_sizes = [512, 1024, 2048, 4096, 8192];
 
     for partial_size in partial_sizes {
         let mut group = c.benchmark_group(format!("decompress_partial_{}b", partial_size));
 
-        for (name, compressed_data, compression_type) in &chunks {
-            let compression = CompressionType::from_byte(*compression_type).unwrap();
+        if let Some(ref compressed_data) = chunk.data {
+            let name = format!("chunk_{}_{}", 0, 0);
+            let compression = region.compression;
 
             group.bench_with_input(
-                BenchmarkId::from_parameter(name),
+                BenchmarkId::from_parameter(&name),
                 compressed_data,
                 |b, data| {
                     b.iter(|| {
                         black_box(
-                            decompress_chunk(compression, black_box(data), partial_size).unwrap(),
+                            decompress_partial(compression, black_box(data), partial_size).unwrap(),
                         )
                     });
                 },
@@ -121,28 +83,39 @@ fn bench_decompress_partial(c: &mut Criterion) {
 }
 
 fn bench_partial_vs_full_comparison(c: &mut Criterion) {
-    let chunks = load_compressed_chunks();
+    let Some(region) = load_region() else {
+        eprintln!("Skipping bench_partial_vs_full_comparison: test data not found");
+        return;
+    };
+
+    let Some(Some(chunk)) = region.chunks.get(0).and_then(|row| row.get(0)) else {
+        eprintln!("Skipping bench_decompress_partial: no chunks in test data");
+        return;
+    };
 
     let mut group = c.benchmark_group("partial_vs_full_comparison");
 
-    for (name, compressed_data, compression_type) in &chunks {
-        let compression = CompressionType::from_byte(*compression_type).unwrap();
+    if let Some(ref compressed_data) = chunk.data {
+        let name = format!("chunk_{}_{}", 0, 0);
+        let compression = region.compression;
 
         // Full decompression
         group.bench_with_input(
-            BenchmarkId::new("full", name),
+            BenchmarkId::new("full", &name),
             compressed_data,
             |b, data| {
-                b.iter(|| black_box(decompress_full(compression, black_box(data)).unwrap()));
+                b.iter(|| black_box(decompress(compression, black_box(data)).unwrap()));
             },
         );
 
-        // Partial decompression (1KB - your current default)
+        // Partial decompression
         group.bench_with_input(
-            BenchmarkId::new("partial_1kb", name),
+            BenchmarkId::new("partial_512b", &name),
             compressed_data,
             |b, data| {
-                b.iter(|| black_box(decompress_chunk(compression, black_box(data), 1024).unwrap()));
+                b.iter(|| {
+                    black_box(decompress_partial(compression, black_box(data), 512).unwrap())
+                });
             },
         );
     }

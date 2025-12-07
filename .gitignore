@@ -4,3 +4,4 @@ perf.*
 .vscode
 STATS.md
 .cargo/config.local.toml
+benches/test_write

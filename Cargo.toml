@@ -1,17 +1,16 @@
 [package]
 name = "rori"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dev-dependencies]
 criterion = { package = "codspeed-criterion-compat", version = "3.0.5" }
 
 [dependencies]
-byteorder = "1.5.0"
 clap = { version = "4.5.42", features = ["derive"] }
 env_logger = "0.11.8"
 fastanvil = "0.31.0"
-flate2 = { version = "1.1.2", features = ["zlib-ng"] }
+libdeflater = "1.22"
 indicatif = "0.18.0"
 log = "0.4.27"
 num_cpus = "1.17.0"
@@ -45,3 +44,15 @@ harness = false
 [[bench]]
 name = "decompress_chunk"
 harness = false
+
+[[bin]]
+name = "rori"
+path = "src/main.rs"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+inline_always = "allow"
+missing_errors_doc = "allow"
+literal_string_with_formatting_args = "allow"

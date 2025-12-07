@@ -1,7 +1,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 
 use log::warn;
-use rori::process_directory;
+use rori::{Conf, process_directory};
 
 fn bench_dry_process_directory(c: &mut Criterion) {
     let path = std::path::Path::new("benches/test_data/region_small");
@@ -18,11 +18,11 @@ fn bench_dry_process_directory(c: &mut Criterion) {
 
     c.bench_function("process_directory_partial_1kb", |b| {
         b.iter(|| {
-            let options = rori::ProcessingOptions {
+            let options = Conf {
                 dry_run,
                 inhabited_time_threshold: inhabited_time,
-                delete_entire_regions: false,
-                max_decompression_bytes: 1024,
+                delete_regions: false,
+                no_progress: true,
             };
             process_directory(path, &options).unwrap();
         });
@@ -30,11 +30,11 @@ fn bench_dry_process_directory(c: &mut Criterion) {
 
     c.bench_function("process_directory_full", |b| {
         b.iter(|| {
-            let options = rori::ProcessingOptions {
+            let options = Conf {
                 dry_run,
                 inhabited_time_threshold: inhabited_time,
-                delete_entire_regions: false,
-                max_decompression_bytes: 0,
+                delete_regions: false,
+                no_progress: true,
             };
             process_directory(path, &options).unwrap();
         });

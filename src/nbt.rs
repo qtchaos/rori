@@ -1,32 +1,73 @@
 use std::io::ErrorKind;
 
-/// NBT parsing errors.
+/// Branch prediction hints for hot paths
+#[inline(always)]
+#[cold]
+const fn cold() {}
+
+#[inline(always)]
+const fn likely(b: bool) -> bool {
+    if !b {
+        cold();
+    }
+    b
+}
+
+#[inline(always)]
+const fn unlikely(b: bool) -> bool {
+    if b {
+        cold();
+    }
+    b
+}
+
+// Const error messages to avoid allocations in hot paths
+pub const ERR_NEGATIVE_ARRAY: &str = "Negative array length";
+pub const ERR_NEGATIVE_LIST: &str = "Negative list length";
+pub const ERR_SIZE_OVERFLOW: &str = "Size overflow";
+pub const ERR_UNEXPECTED_TYPE: &str = "Field has unexpected type";
+pub const ERR_NOT_COMPOUND: &str = "Root tag is not a compound";
+pub const ERR_UNKNOWN_TAG: &str = "Unknown NBT tag type";
+pub const ERR_NOT_FOUND: &str = "Field not found";
+const ERR_UNEXPECTED_EOF: &str = "unexpected EOF while parsing NBT";
+
 #[derive(Debug)]
 pub enum NbtError {
-    /// I/O error occurred during parsing
     IoError(std::io::Error),
-    /// Invalid or malformed NBT format
     InvalidFormat(String),
+    FieldNotFound(Vec<u8>),
 }
 
 impl From<std::io::Error> for NbtError {
+    #[inline]
     fn from(error: std::io::Error) -> Self {
-        NbtError::IoError(error)
+        Self::IoError(error)
     }
 }
 
 impl std::fmt::Display for NbtError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NbtError::IoError(e) => write!(f, "IO error: {}", e),
-            NbtError::InvalidFormat(msg) => write!(f, "Invalid NBT format: {}", msg),
+            Self::IoError(e) => write!(f, "IO error: {e}"),
+            Self::InvalidFormat(msg) => write!(f, "Invalid NBT format: {msg}"),
+            Self::FieldNotFound(field) => {
+                write!(f, "Field not found: {}", String::from_utf8_lossy(field))
+            }
         }
     }
 }
-
 impl std::error::Error for NbtError {}
 
-/// NBT Tag types as defined in the NBT specification.
+/// Helper to generate cold EOF error
+#[inline(always)]
+#[cold]
+fn eof_error() -> NbtError {
+    NbtError::IoError(std::io::Error::new(
+        ErrorKind::UnexpectedEof,
+        ERR_UNEXPECTED_EOF,
+    ))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum NbtTag {
@@ -45,363 +86,405 @@ pub enum NbtTag {
     LongArray = 12,
 }
 
-impl NbtTag {
-    /// Convert a byte value to an NbtTag.
-    #[inline(always)]
-    pub fn from_u8(value: u8) -> Result<Self, NbtError> {
-        match value {
-            0 => Ok(NbtTag::End),
-            1 => Ok(NbtTag::Byte),
-            2 => Ok(NbtTag::Short),
-            3 => Ok(NbtTag::Int),
-            4 => Ok(NbtTag::Long),
-            5 => Ok(NbtTag::Float),
-            6 => Ok(NbtTag::Double),
-            7 => Ok(NbtTag::ByteArray),
-            8 => Ok(NbtTag::String),
-            9 => Ok(NbtTag::List),
-            10 => Ok(NbtTag::Compound),
-            11 => Ok(NbtTag::IntArray),
-            12 => Ok(NbtTag::LongArray),
-            _ => Err(NbtError::InvalidFormat(format!(
-                "Unknown NBT tag type: {}",
-                value
-            ))),
-        }
-    }
-
-    /// Convert the NbtTag to its byte representation.
-    #[inline(always)]
-    #[allow(dead_code)]
-    pub fn as_u8(self) -> u8 {
-        self as u8
-    }
+#[derive(Debug, Clone, PartialEq)]
+#[repr(u8)]
+pub enum NbtValue {
+    Byte(i8),
+    Short(i16),
+    Int(i32),
+    Long(i64),
+    Float(f32),
+    Double(f64),
+    String(String),
 }
 
-/// A zero-copy NBT reader that operates on a borrowed byte slice.
-/// Provides efficient reading and skipping operations for NBT data.
+const TAG_LOOKUP: [Option<NbtTag>; 256] = {
+    let mut table = [None; 256];
+    table[0] = Some(NbtTag::End);
+    table[1] = Some(NbtTag::Byte);
+    table[2] = Some(NbtTag::Short);
+    table[3] = Some(NbtTag::Int);
+    table[4] = Some(NbtTag::Long);
+    table[5] = Some(NbtTag::Float);
+    table[6] = Some(NbtTag::Double);
+    table[7] = Some(NbtTag::ByteArray);
+    table[8] = Some(NbtTag::String);
+    table[9] = Some(NbtTag::List);
+    table[10] = Some(NbtTag::Compound);
+    table[11] = Some(NbtTag::IntArray);
+    table[12] = Some(NbtTag::LongArray);
+    table
+};
+
+impl NbtTag {
+    #[inline]
+    pub fn from_u8(value: u8) -> Result<Self, NbtError> {
+        TAG_LOOKUP[value as usize].ok_or_else(|| NbtError::InvalidFormat(ERR_UNKNOWN_TAG.into()))
+    }
+}
 pub struct NbtReader<'a> {
-    /// The data slice to read from
     data: &'a [u8],
 }
 
 impl<'a> NbtReader<'a> {
-    /// Create a new NbtReader from a byte slice.
-    pub fn new(data: &'a [u8]) -> Self {
+    #[must_use]
+    pub const fn new(data: &'a [u8]) -> Self {
         Self { data }
     }
 
-    /// Get the current byte position in the original data slice.
-    /// Useful for tracking how far into the data we've read.
-    #[inline(always)]
-    pub fn position(&self, original_data: &'a [u8]) -> usize {
+    #[inline]
+    #[must_use]
+    pub const fn position(&self, original_data: &'a [u8]) -> usize {
         original_data.len() - self.data.len()
     }
 
-    /// Ensure at least `need` bytes are available.
-    #[inline(always)]
-    fn ensure_len(&self, need: usize) -> Result<(), NbtError> {
-        if self.data.len() < need {
-            return Err(NbtError::IoError(std::io::Error::new(
-                ErrorKind::UnexpectedEof,
-                "unexpected EOF while parsing NBT",
-            )));
-        }
-        Ok(())
-    }
-
-    /// Read a single unsigned byte and advance the reader.
     #[inline(always)]
     pub fn read_u8(&mut self) -> Result<u8, NbtError> {
-        self.ensure_len(1)?;
-        let v = self.data[0];
-        self.data = &self.data[1..];
-        Ok(v)
+        if likely(!self.data.is_empty()) {
+            let byte = unsafe { *self.data.get_unchecked(0) };
+            self.data = unsafe { self.data.get_unchecked(1..) };
+            Ok(byte)
+        } else {
+            Err(eof_error())
+        }
     }
 
-    /// Read a single signed byte and advance the reader.
-    #[inline(always)]
+    #[inline]
     pub fn read_i8(&mut self) -> Result<i8, NbtError> {
-        Ok(self.read_u8()? as i8)
+        self.read_u8().map(u8::cast_signed)
     }
 
-    /// Read an unsigned 16-bit big-endian integer and advance the reader.
     #[inline(always)]
     pub fn read_u16_be(&mut self) -> Result<u16, NbtError> {
-        self.ensure_len(2)?;
-        let v = u16::from_be_bytes([self.data[0], self.data[1]]);
-        self.data = &self.data[2..];
-        Ok(v)
+        if likely(self.data.len() >= 2) {
+            // Use unaligned read for better performance on modern CPUs
+            let v =
+                unsafe { u16::from_be(std::ptr::read_unaligned(self.data.as_ptr().cast::<u16>())) };
+            self.data = unsafe { self.data.get_unchecked(2..) };
+            Ok(v)
+        } else {
+            Err(eof_error())
+        }
     }
 
-    /// Read a signed 16-bit big-endian integer and advance the reader.
-    #[inline(always)]
+    #[inline]
     pub fn read_i16_be(&mut self) -> Result<i16, NbtError> {
-        Ok(self.read_u16_be()? as i16)
+        self.read_u16_be().map(u16::cast_signed)
     }
 
-    /// Read an unsigned 32-bit big-endian integer and advance the reader.
-    #[inline(always)]
+    #[inline]
     pub fn read_u32_be(&mut self) -> Result<u32, NbtError> {
-        self.ensure_len(4)?;
-        let v = u32::from_be_bytes([self.data[0], self.data[1], self.data[2], self.data[3]]);
-        self.data = &self.data[4..];
-        Ok(v)
+        if self.data.len() >= 4 {
+            let v = u32::from_be_bytes(unsafe {
+                [
+                    *self.data.get_unchecked(0),
+                    *self.data.get_unchecked(1),
+                    *self.data.get_unchecked(2),
+                    *self.data.get_unchecked(3),
+                ]
+            });
+            self.data = unsafe { self.data.get_unchecked(4..) };
+            Ok(v)
+        } else {
+            Err(eof_error())
+        }
     }
 
-    /// Read a signed 32-bit big-endian integer and advance the reader.
-    #[inline(always)]
+    #[inline]
     pub fn read_i32_be(&mut self) -> Result<i32, NbtError> {
-        Ok(self.read_u32_be()? as i32)
+        self.read_u32_be().map(u32::cast_signed)
     }
 
-    /// Read an unsigned 64-bit big-endian integer and advance the reader.
-    #[inline(always)]
+    #[inline]
     pub fn read_u64_be(&mut self) -> Result<u64, NbtError> {
-        self.ensure_len(8)?;
-        let v = u64::from_be_bytes([
-            self.data[0],
-            self.data[1],
-            self.data[2],
-            self.data[3],
-            self.data[4],
-            self.data[5],
-            self.data[6],
-            self.data[7],
-        ]);
-        self.data = &self.data[8..];
-        Ok(v)
+        if self.data.len() >= 8 {
+            let v = u64::from_be_bytes(unsafe {
+                [
+                    *self.data.get_unchecked(0),
+                    *self.data.get_unchecked(1),
+                    *self.data.get_unchecked(2),
+                    *self.data.get_unchecked(3),
+                    *self.data.get_unchecked(4),
+                    *self.data.get_unchecked(5),
+                    *self.data.get_unchecked(6),
+                    *self.data.get_unchecked(7),
+                ]
+            });
+            self.data = unsafe { self.data.get_unchecked(8..) };
+            Ok(v)
+        } else {
+            Err(eof_error())
+        }
     }
 
-    /// Read a signed 64-bit big-endian integer and advance the reader.
-    #[inline(always)]
+    #[inline]
     pub fn read_i64_be(&mut self) -> Result<i64, NbtError> {
-        Ok(self.read_u64_be()? as i64)
+        self.read_u64_be().map(u64::cast_signed)
     }
 
-    /// Read a 32-bit big-endian float and advance the reader.
-    #[inline(always)]
+    #[inline]
     pub fn read_f32_be(&mut self) -> Result<f32, NbtError> {
-        let bits = self.read_u32_be()?;
-        Ok(f32::from_bits(bits))
+        self.read_u32_be().map(f32::from_bits)
     }
 
-    /// Read a 64-bit big-endian double and advance the reader.
-    #[inline(always)]
+    #[inline]
     pub fn read_f64_be(&mut self) -> Result<f64, NbtError> {
-        let bits = self.read_u64_be()?;
-        Ok(f64::from_bits(bits))
+        self.read_u64_be().map(f64::from_bits)
     }
 
-    /// Skip a specified number of bytes.
-    /// Uses unsafe for performance - bounds checking is done once.
+    #[inline]
+    pub fn read_string(&mut self) -> Result<String, NbtError> {
+        let length = self.read_u16_be()? as usize;
+        let string = unsafe { self.data.get_unchecked(..length) };
+        self.data = unsafe { self.data.get_unchecked(length..) };
+        Ok(String::from_utf8_lossy(string).into_owned())
+    }
+
     #[inline(always)]
     pub fn skip_bytes(&mut self, count: usize) -> Result<(), NbtError> {
-        if self.data.len() < count {
-            return Err(NbtError::IoError(std::io::Error::new(
-                ErrorKind::UnexpectedEof,
-                "Unexpected EOF",
-            )));
+        if likely(self.data.len() >= count) {
+            self.data = unsafe { self.data.get_unchecked(count..) };
+            Ok(())
+        } else {
+            Err(eof_error())
         }
-        unsafe {
-            self.data = self.data.get_unchecked(count..);
-        }
-        Ok(())
     }
 
-    /// Skip over a string value (length-prefixed).
+    #[inline(always)]
     pub fn skip_string(&mut self) -> Result<(), NbtError> {
         let length = self.read_u16_be()? as usize;
         self.skip_bytes(length)
     }
 
-    /// Skip over a tag value based on its type.
-    pub fn skip_tag_value(&mut self, tag_type: NbtTag) -> Result<(), NbtError> {
-        match tag_type {
-            NbtTag::Byte => {
-                self.skip_bytes(1)?;
-            }
-            NbtTag::Short => {
-                self.skip_bytes(2)?;
-            }
-            NbtTag::Int | NbtTag::Float => {
-                self.skip_bytes(4)?;
-            }
-            NbtTag::Long | NbtTag::Double => {
-                self.skip_bytes(8)?;
-            }
-            NbtTag::ByteArray => {
-                let length = self.read_i32_be()?;
-                if length < 0 {
-                    return Err(NbtError::InvalidFormat(format!(
-                        "Negative array length: {}",
-                        length
-                    )));
+    fn skip_list_items(&mut self, list_type: NbtTag, count: usize) -> Result<(), NbtError> {
+        match list_type {
+            NbtTag::Compound => {
+                for _ in 0..count {
+                    self.skip_compound()?;
                 }
-                self.skip_bytes(length as usize)?;
             }
             NbtTag::String => {
-                self.skip_string()?;
+                for _ in 0..count {
+                    self.skip_string()?;
+                }
             }
             NbtTag::List => {
-                let list_type = NbtTag::from_u8(self.read_u8()?)?;
-                let length = self.read_i32_be()?;
-                if length < 0 {
-                    return Err(NbtError::InvalidFormat(format!(
-                        "Negative list length: {}",
-                        length
-                    )));
-                }
-                let length = length as usize;
-                
-                match list_type {
-                    NbtTag::Byte => self.skip_bytes(length)?,
-                    NbtTag::Short => self.skip_bytes(
-                        length
-                            .checked_mul(2)
-                            .ok_or(NbtError::InvalidFormat("List size overflow".into()))?,
-                    )?,
-                    NbtTag::Int | NbtTag::Float => self.skip_bytes(
-                        length
-                            .checked_mul(4)
-                            .ok_or(NbtError::InvalidFormat("List size overflow".into()))?,
-                    )?,
-                    NbtTag::Long | NbtTag::Double => self.skip_bytes(
-                        length
-                            .checked_mul(8)
-                            .ok_or(NbtError::InvalidFormat("List size overflow".into()))?,
-                    )?,
-                    // Complex types need individual skipping
-                    _ => {
-                        for _ in 0..length {
-                            self.skip_tag_value(list_type)?;
-                        }
-                    }
+                for _ in 0..count {
+                    // Recursively skip lists
+                    // We must read the header for each inner list
+                    let inner_type = NbtTag::from_u8(self.read_u8()?)?;
+                    let inner_len: usize = self
+                        .read_i32_be()?
+                        .try_into()
+                        .map_err(|_| NbtError::InvalidFormat(ERR_NEGATIVE_LIST.into()))?;
+                    // Recursively call the optimized list skipper
+                    self.handle_sized_skip(inner_type, inner_len)?;
                 }
             }
-            NbtTag::Compound => {
-                self.skip_compound()?;
-            }
-            NbtTag::IntArray => {
-                let length = self.read_i32_be()?;
-                if length < 0 {
-                    return Err(NbtError::InvalidFormat(format!(
-                        "Negative array length: {}",
-                        length
-                    )));
+            // For fixed-size primitives, the caller (handle_sized_skip) usually
+            // handles them via multiplication, but if we fall through here (e.g. List<ByteArray>),
+            // we use the generic skipper.
+            _ => {
+                for _ in 0..count {
+                    self.skip_tag_value(list_type)?;
                 }
-                self.skip_bytes(
-                    (length as usize)
-                        .checked_mul(4)
-                        .ok_or(NbtError::InvalidFormat("Array size overflow".into()))?,
-                )?;
-            }
-            NbtTag::LongArray => {
-                let length = self.read_i32_be()?;
-                if length < 0 {
-                    return Err(NbtError::InvalidFormat(format!(
-                        "Negative array length: {}",
-                        length
-                    )));
-                }
-                self.skip_bytes(
-                    (length as usize)
-                        .checked_mul(8)
-                        .ok_or(NbtError::InvalidFormat("Array size overflow".into()))?,
-                )?;
-            }
-            NbtTag::End => {
-                // TAG_END has no data
             }
         }
-
         Ok(())
     }
 
-    /// Skip over an entire compound tag (including nested compounds).
+    /// Unified logic for skipping a sequence of N items of Type T.
+    /// Used by both `skip_tag_value` (for Arrays/Lists) and `skip_list_items` (recursion).
+    #[inline]
+    fn handle_sized_skip(&mut self, tag_type: NbtTag, length: usize) -> Result<(), NbtError> {
+        match tag_type {
+            // Primitives: O(1) skip using math
+            NbtTag::Byte => self.skip_bytes(length),
+            NbtTag::Short => self.skip_bytes(
+                length
+                    .checked_mul(2)
+                    .ok_or_else(|| NbtError::InvalidFormat(ERR_SIZE_OVERFLOW.into()))?,
+            ),
+            NbtTag::Int | NbtTag::Float => self.skip_bytes(
+                length
+                    .checked_mul(4)
+                    .ok_or_else(|| NbtError::InvalidFormat(ERR_SIZE_OVERFLOW.into()))?,
+            ),
+            NbtTag::Long | NbtTag::Double => self.skip_bytes(
+                length
+                    .checked_mul(8)
+                    .ok_or_else(|| NbtError::InvalidFormat(ERR_SIZE_OVERFLOW.into()))?,
+            ),
+
+            // Complex types: O(N) loop
+            _ => self.skip_list_items(tag_type, length),
+        }
+    }
+
+    #[inline]
+    pub fn skip_tag_value(&mut self, tag_type: NbtTag) -> Result<(), NbtError> {
+        match tag_type {
+            NbtTag::Byte => self.skip_bytes(1),
+            NbtTag::Short => self.skip_bytes(2),
+            NbtTag::Int | NbtTag::Float => self.skip_bytes(4),
+            NbtTag::Long | NbtTag::Double => self.skip_bytes(8),
+            NbtTag::String => self.skip_string(),
+            NbtTag::ByteArray => {
+                let length: usize = self
+                    .read_i32_be()?
+                    .try_into()
+                    .map_err(|_| NbtError::InvalidFormat(ERR_NEGATIVE_ARRAY.into()))?;
+                self.skip_bytes(length)
+            }
+            NbtTag::IntArray => {
+                let length: usize = self
+                    .read_i32_be()?
+                    .try_into()
+                    .map_err(|_| NbtError::InvalidFormat(ERR_NEGATIVE_ARRAY.into()))?;
+                self.handle_sized_skip(NbtTag::Int, length)
+            }
+            NbtTag::LongArray => {
+                let length: usize = self
+                    .read_i32_be()?
+                    .try_into()
+                    .map_err(|_| NbtError::InvalidFormat(ERR_NEGATIVE_ARRAY.into()))?;
+                self.handle_sized_skip(NbtTag::Long, length)
+            }
+            NbtTag::List => {
+                let list_type = NbtTag::from_u8(self.read_u8()?)?;
+                let length: usize = self
+                    .read_i32_be()?
+                    .try_into()
+                    .map_err(|_| NbtError::InvalidFormat(ERR_NEGATIVE_LIST.into()))?;
+                self.handle_sized_skip(list_type, length)
+            }
+            NbtTag::Compound => self.skip_compound(),
+            NbtTag::End => Ok(()),
+        }
+    }
+
+    #[inline]
     pub fn skip_compound(&mut self) -> Result<(), NbtError> {
         loop {
-            let tag_type = NbtTag::from_u8(self.read_u8()?)?;
-            if tag_type == NbtTag::End {
+            // Prefetch ahead for better cache performance
+            #[cfg(target_arch = "x86_64")]
+            if self.data.len() >= 128 {
+                unsafe {
+                    std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(
+                        self.data.as_ptr().add(64).cast::<i8>(),
+                    );
+                }
+            }
+
+            let tag_byte = self.read_u8()?;
+            // End tag is rare in the middle of compound, common at the end
+            if unlikely(tag_byte == 0) {
                 break;
             }
+            let tag_type = NbtTag::from_u8(tag_byte)?;
 
             self.skip_string()?;
             self.skip_tag_value(tag_type)?;
         }
-
         Ok(())
     }
 
-    /// Check if the next string matches a target string without allocating.
-    /// Uses byte slice comparison for matching.
-    /// Returns true if the string matches and advances the reader past it.
-    ///
-    /// # Arguments
-    /// * `target` - The target string to match against
-    #[inline(always)]
-    pub fn is_string_match(&mut self, target: &[u8]) -> Result<bool, NbtError> {
-        let length = self.read_u16_be()? as usize;
-
-        if length != target.len() {
-            self.skip_bytes(length)?;
-            return Ok(false);
-        }
-
-        self.ensure_len(length)?;
-        
-        let matches = &self.data[..length] == target;
-        self.data = &self.data[length..];
-        Ok(matches)
-    }
-
-    /// Search through a compound tag for a specific field at the current depth only.
-    /// Does not recurse into nested compounds.
-    ///
-    /// # Arguments
-    /// * `field_name` - The name of the field to search for
-    /// * `original_data` - The original data slice (for position tracking)
-    ///
-    /// # Returns
-    /// A tuple of (Option<i64>, usize) where:
-    /// - First element is the field value if found
-    /// - Second element is the byte position where the value data starts in the original buffer (0 if not found)
-    ///   This position points to the beginning of the value bytes, before they are read.
+    // Tries to search for the field, if it's found, then it returns the value and the byte position where it was found
+    #[inline]
     pub fn search_compound_for_field(
         &mut self,
         field_name: &[u8],
         original_data: &'a [u8],
-    ) -> Result<(Option<i64>, usize), NbtError> {
+    ) -> Result<(Option<NbtValue>, usize), NbtError> {
+        let field_name_len = field_name.len();
+
         loop {
             let tag_type = NbtTag::from_u8(self.read_u8()?)?;
             if tag_type == NbtTag::End {
-                return Ok((None, 0));
+                return Err(NbtError::FieldNotFound(field_name.to_vec()));
             }
 
-            // Check if this field matches our target
-            let is_target_field = self.is_string_match(field_name)?;
+            let name_length = self.read_u16_be()? as usize;
 
-            if !is_target_field {
-                // Skip this tag's value
-                self.skip_tag_value(tag_type)?;
+            // If lengths don't match, don't bother comparing bytes
+            let is_match = if name_length == field_name_len {
+                if self.data.len() < name_length {
+                    return Err(eof_error());
+                }
+                let m = unsafe { self.data.get_unchecked(..name_length) == field_name };
+                self.data = unsafe { self.data.get_unchecked(name_length..) };
+                m
             } else {
-                // Found the target field, record position before reading value
-                let position = self.position(original_data);
+                self.skip_bytes(name_length)?;
+                false
+            };
 
-                // Read its value
-                let result = match tag_type {
-                    NbtTag::Long => Ok((Some(self.read_i64_be()?), position)),
-                    NbtTag::Int => Ok((Some(self.read_i32_be()? as i64), position)),
-                    NbtTag::Short => Ok((Some(self.read_i16_be()? as i64), position)),
-                    NbtTag::Byte => Ok((Some(self.read_i8()? as i64), position)),
-                    _ => Err(NbtError::InvalidFormat(format!(
-                        "Field has unexpected type: {:?}",
-                        tag_type
-                    ))),
+            if is_match {
+                let position = self.position(original_data); // Position *at start of value*
+                let val = match tag_type {
+                    NbtTag::Long => NbtValue::Long(self.read_i64_be()?),
+                    NbtTag::Int => NbtValue::Int(self.read_i32_be()?),
+                    NbtTag::Short => NbtValue::Short(self.read_i16_be()?),
+                    NbtTag::Byte => NbtValue::Byte(self.read_i8()?),
+                    NbtTag::Double => NbtValue::Double(self.read_f64_be()?),
+                    NbtTag::Float => NbtValue::Float(self.read_f32_be()?),
+                    NbtTag::String => NbtValue::String(self.read_string()?),
+                    _ => unimplemented!(),
                 };
+                return Ok((Some(val), position));
+            }
+            self.skip_tag_value(tag_type)?;
+        }
+    }
+}
 
-                return result;
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TimeResult {
+    pub time: Option<i64>, // InhabitedTime in ticks
+}
+
+/// Gets the `InhabitedTime` field from chunk NBT data.
+///
+/// # Arguments
+/// * `chunk_data` - Raw NBT data from a Minecraft chunk
+///
+#[inline]
+pub fn get_inhabited_time(chunk_data: &[u8]) -> Result<TimeResult, NbtError> {
+    const INHABITED_TIME: &[u8] = b"InhabitedTime";
+
+    // Prefetch the beginning of the chunk data into cache
+    if chunk_data.len() >= 64 {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            if is_x86_feature_detected!("sse") {
+                std::arch::x86_64::_mm_prefetch(
+                    chunk_data.as_ptr().cast::<i8>(),
+                    std::arch::x86_64::_MM_HINT_T0,
+                );
             }
         }
+    }
+
+    let mut reader = NbtReader::new(chunk_data);
+
+    // Read root compound tag
+    let tag_type = NbtTag::from_u8(reader.read_u8()?)?;
+    if tag_type != NbtTag::Compound {
+        return Err(NbtError::InvalidFormat(ERR_NOT_COMPOUND.into()));
+    }
+
+    // Skip root tag name
+    reader.skip_string()?;
+
+    // Search through the root compound for InhabitedTime
+    let (time, byte_pos) = reader.search_compound_for_field(INHABITED_TIME, chunk_data)?;
+    if let Some(NbtValue::Long(time)) = time {
+        if byte_pos > 0 {
+            Ok(TimeResult { time: Some(time) })
+        } else {
+            Err(NbtError::InvalidFormat(ERR_NOT_FOUND.into()))
+        }
+    } else {
+        Err(NbtError::InvalidFormat(ERR_NOT_FOUND.into()))
     }
 }

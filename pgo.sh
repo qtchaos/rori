@@ -1,7 +1,7 @@
 # https://kobzol.github.io/rust/cargo/2023/07/28/rust-cargo-pgo.html
 
 # Initially build with PGO enabled
-cargo pgo build
+cargo pgo build -- --bin rori
 
 # Copy region_large and region_small so we can run write benchmarks
 mkdir -p benches/test_write
@@ -14,7 +14,7 @@ cp -r benches/test_data/region_small benches/test_write/region_small
 rm -rf benches/test_write/region_small
 
 # Build instrumented binary with BOLT+PGO
-cargo pgo bolt build --with-pgo
+cargo pgo bolt build --with-pgo -- --bin rori
 
 # Copy region_small again for the next benchmark
 cp -r benches/test_data/region_small benches/test_write/region_small
@@ -26,4 +26,4 @@ cp -r benches/test_data/region_small benches/test_write/region_small
 rm -rf benches/test_write/region_small
 
 # Optimize the binary with BOLT and PGO
-cargo pgo bolt optimize --with-pgo
+cargo pgo bolt optimize --with-pgo -- --bin rori
