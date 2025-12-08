@@ -1,13 +1,36 @@
 use std::{path::PathBuf, process};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use log::{debug, error, info, warn};
-use rori::{Conf, process_directory};
+use rori::{Conf, Dimension, process_world};
+
+#[derive(Debug, Clone, ValueEnum)]
+enum DimensionArg {
+    /// Process all dimensions (overworld, nether, end)
+    All,
+    /// Process only the overworld
+    Overworld,
+    /// Process only the nether (DIM-1)
+    Nether,
+    /// Process only the end (DIM1)
+    End,
+}
+
+impl From<DimensionArg> for Vec<Dimension> {
+    fn from(arg: DimensionArg) -> Self {
+        match arg {
+            DimensionArg::All => vec![Dimension::Overworld, Dimension::Nether, Dimension::End],
+            DimensionArg::Overworld => vec![Dimension::Overworld],
+            DimensionArg::Nether => vec![Dimension::Nether],
+            DimensionArg::End => vec![Dimension::End],
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Path to directory containing .mca files
+    /// Path to world directory (will auto-detect dimensions) or specific region directory
     path: PathBuf,
 
     /// Enable dry run mode, which only simulates processing without making changes
@@ -34,6 +57,10 @@ struct Args {
     /// No progress bar
     #[arg(long)]
     no_progress: bool,
+
+    /// Which dimension(s) to process. Only applies if path is a world directory.
+    #[arg(short, long, value_enum, default_value = "all")]
+    dimension: DimensionArg,
 }
 
 fn main() {
@@ -86,7 +113,9 @@ fn main() {
         no_progress: args.no_progress,
     };
 
-    let result = match process_directory(&args.path, &config) {
+    let dimensions: Vec<Dimension> = args.dimension.into();
+
+    let result = match process_world(&args.path, &config, &dimensions) {
         Ok(result) => result,
         Err(e) => {
             error!("Processing failed: {e}");
@@ -95,6 +124,31 @@ fn main() {
     };
 
     let duration = start.elapsed();
+
+    // Print per-dimension statistics
+    for dim_result in &result.dimension_results {
+        info!(
+            "{}: {} regions, {} chunks ({} inhabited, {:.1}%)",
+            dim_result.dimension.name(),
+            dim_result.total_regions,
+            dim_result.total_chunk_stats.total,
+            dim_result.total_chunk_stats.inhabited,
+            if dim_result.total_chunk_stats.total > 0 {
+                (f64::from(dim_result.total_chunk_stats.inhabited))
+                    / f64::from(dim_result.total_chunk_stats.total)
+                    * 100.0
+            } else {
+                0.0
+            }
+        );
+
+        if dim_result.deleted_regions > 0 {
+            info!("  Deleted regions: {}", dim_result.deleted_regions);
+        }
+    }
+
+    // Print totals
+    info!("===== TOTAL =====");
     info!(
         "Total processed: {} regions, {} chunks",
         result.total_regions, result.total_chunk_stats.total

@@ -1,10 +1,10 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 
 use log::warn;
-use rori::{Conf, process_directory};
+use rori::{Conf, Dimension, process_world};
 
 fn bench_dry_process_directory(c: &mut Criterion) {
-    let path = std::path::Path::new("benches/test_data/region_small");
+    let path = std::path::Path::new("benches/test_data");
     let dry_run = true;
     let inhabited_time = 100;
 
@@ -24,7 +24,12 @@ fn bench_dry_process_directory(c: &mut Criterion) {
                 delete_regions: false,
                 no_progress: true,
             };
-            process_directory(path, &options).unwrap();
+            process_world(
+                path,
+                &options,
+                &[Dimension::Overworld, Dimension::Nether, Dimension::End],
+            )
+            .unwrap();
         });
     });
 
@@ -36,7 +41,12 @@ fn bench_dry_process_directory(c: &mut Criterion) {
                 delete_regions: false,
                 no_progress: true,
             };
-            process_directory(path, &options).unwrap();
+            process_world(
+                path,
+                &options,
+                &[Dimension::Overworld, Dimension::Nether, Dimension::End],
+            )
+            .unwrap();
         });
     });
 }

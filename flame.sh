@@ -8,7 +8,7 @@ if ! command -v perf &> /dev/null; then
 fi
 
 mkdir -p benches/test_write
-cp -r benches/test_data/region_small benches/test_write/region_small
+cp -r benches/test_data/* benches/test_write
 
-cargo flamegraph --bin rori --dev -i --flamechart -- "benches/test_write/region_small/"
+cargo flamegraph --bin rori --dev -i --flamechart -- "benches/test_write"
 xdg-open flamegraph.svg

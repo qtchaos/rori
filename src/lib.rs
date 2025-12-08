@@ -5,7 +5,7 @@ use crate::decompress::{CompressionType, anvil_region, mmap_region};
 
 use fastanvil::CompressionScheme;
 use indicatif::{ProgressBar, ProgressStyle};
-use log::{debug, error, trace, warn};
+use log::{debug, error, info, trace, warn};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{
     fs,
@@ -15,6 +15,34 @@ use std::{
 
 /// Minecraft regions are 32x32 chunks
 const REGION_SIZE: usize = 32;
+
+/// Represents a Minecraft dimension
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dimension {
+    Overworld,
+    Nether,
+    End,
+}
+
+impl Dimension {
+    /// Get the relative path for this dimension within a world directory
+    pub fn path(&self) -> &'static str {
+        match self {
+            Self::Overworld => "region",
+            Self::Nether => "DIM-1/region",
+            Self::End => "DIM1/region",
+        }
+    }
+
+    /// Get a human-readable name for this dimension
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Overworld => "Overworld",
+            Self::Nether => "Nether",
+            Self::End => "End",
+        }
+    }
+}
 
 /// Configuration options for processing Minecraft region files.
 #[derive(Debug, Clone, Default)]
@@ -63,7 +91,7 @@ impl From<std::io::Error> for ProcessError {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct ChunkStats {
     /// Total number of chunks processed in the region
     pub total: u32,
@@ -87,11 +115,20 @@ pub struct RegionStats {
     pub chunks: ChunkStats,
 }
 
-/// Results from processing a directory of region files
+/// Results from processing a single dimension
+#[derive(Debug)]
+pub struct DimensionResult {
+    pub dimension: Dimension,
+    pub regions: Vec<Region>,
+    pub total_regions: usize,
+    pub deleted_regions: usize,
+    pub total_chunk_stats: ChunkStats,
+}
+
+/// Results from processing a world (potentially multiple dimensions)
 #[derive(Debug)]
 pub struct ProcessingResult {
-    pub regions: Vec<Region>,
-    // pub byte_position: BytePosition,
+    pub dimension_results: Vec<DimensionResult>,
     pub total_regions: usize,
     pub deleted_regions: usize,
     pub total_chunk_stats: ChunkStats,
@@ -141,12 +178,121 @@ impl Region {
     }
 }
 
+/// Process a Minecraft world, automatically detecting and processing specified dimensions.
+///
+/// # Arguments
+/// * `path` - Path to the world directory or specific region directory
+/// * `config` - Processing configuration options
+/// * `dimensions` - Which dimensions to process
+pub fn process_world(
+    path: &Path,
+    config: &Conf,
+    dimensions: &[Dimension],
+) -> Result<ProcessingResult, ProcessError> {
+    // Check if path is a world directory or a direct region directory
+    let is_world_dir =
+        path.join("region").exists() || path.join("DIM-1").exists() || path.join("DIM1").exists();
+
+    if is_world_dir {
+        // Process as world directory with multiple dimensions
+        process_world_directory(path, config, dimensions)
+    } else {
+        // Process as single region directory (backward compatibility)
+        info!("Processing as single region directory");
+        let result = process_directory(path, config, &Dimension::Overworld)?;
+
+        Ok(ProcessingResult {
+            dimension_results: vec![DimensionResult {
+                dimension: Dimension::Overworld,
+                regions: result.regions,
+                total_regions: result.total_regions,
+                deleted_regions: result.deleted_regions,
+                total_chunk_stats: result.total_chunk_stats,
+            }],
+            total_regions: result.total_regions,
+            deleted_regions: result.deleted_regions,
+            total_chunk_stats: result.total_chunk_stats,
+        })
+    }
+}
+
+/// Process a world directory with multiple dimensions
+fn process_world_directory(
+    world_path: &Path,
+    config: &Conf,
+    dimensions: &[Dimension],
+) -> Result<ProcessingResult, ProcessError> {
+    let mut dimension_results = Vec::new();
+    let mut total_regions = 0;
+    let mut deleted_regions = 0;
+    let mut total_chunk_stats = ChunkStats::default();
+
+    for &dimension in dimensions {
+        let dimension_path = world_path.join(dimension.path());
+
+        if !dimension_path.exists() {
+            debug!(
+                "{} dimension not found at {}, skipping",
+                dimension.name(),
+                dimension_path.display()
+            );
+            continue;
+        }
+
+        match process_directory(&dimension_path, config, &dimension) {
+            Ok(result) => {
+                total_regions += result.total_regions;
+                deleted_regions += result.deleted_regions;
+                total_chunk_stats.merge(&result.total_chunk_stats);
+
+                dimension_results.push(DimensionResult {
+                    dimension,
+                    regions: result.regions,
+                    total_regions: result.total_regions,
+                    deleted_regions: result.deleted_regions,
+                    total_chunk_stats: result.total_chunk_stats,
+                });
+            }
+            Err(ProcessError::NoFilesFound) => {
+                debug!("No region files found in {} dimension", dimension.name());
+            }
+            Err(e) => {
+                warn!("Failed to process {} dimension: {}", dimension.name(), e);
+            }
+        }
+    }
+
+    if dimension_results.is_empty() {
+        return Err(ProcessError::NoFilesFound);
+    }
+
+    Ok(ProcessingResult {
+        dimension_results,
+        total_regions,
+        deleted_regions,
+        total_chunk_stats,
+    })
+}
+
+/// Internal result type for processing a single directory
+#[derive(Debug)]
+struct DirectoryResult {
+    regions: Vec<Region>,
+    total_regions: usize,
+    deleted_regions: usize,
+    total_chunk_stats: ChunkStats,
+}
+
 /// Process all Minecraft region files in a directory.
 ///
 /// # Arguments
 /// * `path` - Path to the directory containing .mca files
-/// * `options` - Processing configuration options
-pub fn process_directory(path: &Path, config: &Conf) -> Result<ProcessingResult, ProcessError> {
+/// * `config` - Processing configuration options
+fn process_directory(
+    path: &Path,
+    config: &Conf,
+    dimension: &Dimension,
+) -> Result<DirectoryResult, ProcessError> {
     let start = Instant::now();
     let region_files = find_region_files(path)?;
     debug!(
@@ -164,11 +310,14 @@ pub fn process_directory(path: &Path, config: &Conf) -> Result<ProcessingResult,
     let pb = if !config.no_progress {
         let pb = ProgressBar::new(region_files.len() as u64);
         pb.set_style(
-            ProgressStyle::with_template("[{elapsed_precise}] [{bar:40}] {pos}/{len} {msg}")
-                .unwrap_or_else(|e| {
-                    warn!("Failed to set progress bar style: {e}, using default");
-                    ProgressStyle::default_bar()
-                }),
+            ProgressStyle::with_template(&format!(
+                "[{{elapsed_precise}}] [{{bar:40}}] {{pos}}/{{len}} {} - {{msg}}",
+                dimension.name()
+            ))
+            .unwrap_or_else(|e| {
+                warn!("Failed to set progress bar style: {e}, using default");
+                ProgressStyle::default_bar()
+            }),
         );
         Some(pb)
     } else {
@@ -214,7 +363,7 @@ pub fn process_directory(path: &Path, config: &Conf) -> Result<ProcessingResult,
         total_chunk_stats.merge(&region.stats.chunks);
     }
 
-    Ok(ProcessingResult {
+    Ok(DirectoryResult {
         regions,
         total_regions,
         deleted_regions,

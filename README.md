@@ -15,6 +15,8 @@ bold = current version
 | **rori 0.3**           | 4.06     | 4.35         | 12      | 399145            |
 | rori 0.2 (regions) | 6.7      | 6.01             | 12      | 241870            |
 | rori 0.2           | 6.78     | 5.82             | 12      | 239016            |
+| **rori 0.3 (4 threads)**| 8.86     | 8.94        | **4**   | 182903             |
+| thanos             | 16.3     | N/A              | 4       | 99418             |
 | **rori 0.3 (1 thread)**| 36     | 33             | **1**   | 49000             |
 | PotatoPeeler       | 126.7    | 137.5            | 12      | 12790             |
 | ChunkCleaner       | N/A      | 610              | N/A     | 2656              |
@@ -24,6 +26,50 @@ bold = current version
 <img src="https://raw.githubusercontent.com/qtchaos/rori/refs/heads/master/.github/assets/chunks.png" alt="Chunk Mode" width="200">
 <img src="https://raw.githubusercontent.com/qtchaos/rori/refs/heads/master/.github/assets/regions.png" alt="Region Mode" width="200">
 
+## Usage
+
+### Basic Usage
+
+Process an entire world (all dimensions):
+```bash
+rori /path/to/world --dry-run
+```
+
+Process a specific region directory:
+```bash
+rori /path/to/world/region --dry-run
+```
+
+### Dimension Selection
+
+Process only specific dimensions:
+```bash
+# Process only the Overworld
+rori /path/to/world --dimension overworld
+
+# Process only the Nether
+rori /path/to/world --dimension nether
+
+# Process only the End
+rori /path/to/world --dimension end
+
+# Process all dimensions (default)
+rori /path/to/world --dimension all
+```
+
+### Advanced Examples
+
+```bash
+# Process all dimensions with custom inhabited time threshold
+rori /path/to/world --inhabited-time 200 --dimension all
+
+# Delete regions instead of individual chunks in the Nether
+rori /path/to/world --dimension nether --delete-regions
+
+# Process only Overworld with 8 threads
+rori /path/to/world --dimension overworld --threads 8
+```
+
 ## Arguments
 
 | Argument                | Default           | Description                                                                       |
@@ -32,7 +78,9 @@ bold = current version
 | `-v` `--verbose`        |                   | Increased verbosity, `-vv` for traces                                             |
 | `--dry-run`             | `false`           | Enable dry run mode, which only simulates processing without making changes       |
 | `-t` `--threads`        | `num_cpus::get()` | Number of threads to use for processing regions in parallel                       |
+| `-i` `--inhabited-time` | `100`             | Chunks with InhabitedTime below or equal to this threshold will be deleted        |
 | `--delete-regions`      | `false`           | Delete entire regions instead of individual chunks when no inhabited chunks exist |
+| `-d` `--dimension`      | `all`             | Which dimension(s) to process: `all`, `overworld`, `nether`, or `end`            |
 | `--no-progress`         | `false`           | Disable progress bar                                                              |
 
 ## Building
