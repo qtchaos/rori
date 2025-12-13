@@ -1,0 +1,27 @@
+name: Build
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Build
+        run: cargo build --verbose --release
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: rori-release
+          path: target/release/rori
+      
