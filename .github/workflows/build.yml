@@ -20,7 +20,7 @@ jobs:
       - name: Build
         run: cargo build --verbose --release
       - name: Upload build artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v6
         with:
           name: rori-release
           path: target/release/rori
