@@ -452,16 +452,16 @@ pub struct TimeResult {
 pub fn get_inhabited_time(chunk_data: &[u8]) -> Result<TimeResult, NbtError> {
     const INHABITED_TIME: &[u8] = b"InhabitedTime";
 
-    // Prefetch the beginning of the chunk data into cache
+    // Prefetch the beginning of the chunk data into cache.
+    // Use a compile-time cfg check instead of is_x86_feature_detected!, which
+    // allocates a thread-local on first access and causes Valgrind false positives.
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse"))]
     if chunk_data.len() >= 64 {
-        #[cfg(target_arch = "x86_64")]
         unsafe {
-            if is_x86_feature_detected!("sse") {
-                std::arch::x86_64::_mm_prefetch(
-                    chunk_data.as_ptr().cast::<i8>(),
-                    std::arch::x86_64::_MM_HINT_T0,
-                );
-            }
+            std::arch::x86_64::_mm_prefetch(
+                chunk_data.as_ptr().cast::<i8>(),
+                std::arch::x86_64::_MM_HINT_T0,
+            );
         }
     }
 
@@ -476,14 +476,12 @@ pub fn get_inhabited_time(chunk_data: &[u8]) -> Result<TimeResult, NbtError> {
     // Skip root tag name
     reader.skip_string()?;
 
-    // Search through the root compound for InhabitedTime
-    let (time, byte_pos) = reader.search_compound_for_field(INHABITED_TIME, chunk_data)?;
+    // Search through the root compound for InhabitedTime.
+    // search_compound_for_field returning Ok already guarantees the field was found,
+    // so no further byte_pos check is needed (and byte_pos == 0 would be a valid offset).
+    let (time, _byte_pos) = reader.search_compound_for_field(INHABITED_TIME, chunk_data)?;
     if let Some(NbtValue::Long(time)) = time {
-        if byte_pos > 0 {
-            Ok(TimeResult { time: Some(time) })
-        } else {
-            Err(NbtError::InvalidFormat(ERR_NOT_FOUND.into()))
-        }
+        Ok(TimeResult { time: Some(time) })
     } else {
         Err(NbtError::InvalidFormat(ERR_NOT_FOUND.into()))
     }

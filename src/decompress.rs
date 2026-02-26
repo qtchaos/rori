@@ -64,13 +64,7 @@ pub fn decompress_partial(
             let mut buf = buf_cell.borrow_mut();
             let mut decompressor = decompressor_cell.borrow_mut();
 
-            let current_cap = buf.capacity();
-            if current_cap < bite_size {
-                buf.reserve(bite_size - current_cap);
-            }
-            unsafe {
-                buf.set_len(bite_size);
-            }
+            buf.resize(bite_size, 0);
 
             match compression {
                 CompressionType::Zlib => {
@@ -121,13 +115,7 @@ pub fn decompress(
 
             // Estimate decompressed size
             let estimated_size = compressed_data.len() * 10;
-            let current_cap = buf.capacity();
-            if current_cap < estimated_size {
-                buf.reserve(estimated_size - current_cap);
-            }
-            unsafe {
-                buf.set_len(estimated_size);
-            }
+            buf.resize(estimated_size, 0);
 
             match compression {
                 CompressionType::Zlib => loop {
@@ -138,13 +126,7 @@ pub fn decompress(
                         }
                         Err(DecompressionError::InsufficientSpace) => {
                             let new_size = buf.len() * 2;
-                            let current_cap = buf.capacity();
-                            if current_cap < new_size {
-                                buf.reserve(new_size - current_cap);
-                            }
-                            unsafe {
-                                buf.set_len(new_size);
-                            }
+                            buf.resize(new_size, 0);
                         }
                         Err(DecompressionError::BadData) => {
                             break Err(ProcessError::ChunkError("Bad data".into()));
