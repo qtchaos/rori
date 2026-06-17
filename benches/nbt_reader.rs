@@ -1,3 +1,4 @@
+#![allow(clippy::significant_drop_tightening)]
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::path::PathBuf;
 
@@ -27,10 +28,12 @@ fn load_sample_chunk() -> Vec<u8> {
                 })
             })
     })
-    .unwrap_or_else(Vec::new)
+    .unwrap_or_default()
 }
 
 fn bench_nbt_reader_search(c: &mut Criterion) {
+    const INHABITED_TIME: &[u8] = b"InhabitedTime";
+
     let chunk_data = load_sample_chunk();
 
     if chunk_data.is_empty() {
@@ -42,18 +45,17 @@ fn bench_nbt_reader_search(c: &mut Criterion) {
             let mut reader = NbtReader::new(black_box(&chunk_data));
 
             // Read root compound tag
-            let tag_type = NbtTag::from_u8(reader.read_u8().unwrap()).unwrap();
+            let tag_type =
+                NbtTag::from_u8(reader.read_u8().expect("read tag byte")).expect("parse tag");
             assert_eq!(tag_type, NbtTag::Compound);
 
             // Skip root tag name
-            reader.skip_string().unwrap();
+            reader.skip_string().expect("skip root name");
 
             // Search for InhabitedTime
-            const INHABITED_TIME: &[u8] = b"InhabitedTime";
-            // pass the original data buffer as the second argument for position tracking
             reader
                 .search_compound_for_field(INHABITED_TIME, black_box(&chunk_data))
-                .unwrap()
+                .expect("find InhabitedTime")
         });
     });
 }
@@ -65,50 +67,49 @@ fn bench_nbt_reader_primitives(c: &mut Criterion) {
     // Add some big-endian integers
     test_data.extend_from_slice(&42i16.to_be_bytes());
     test_data.extend_from_slice(&12345i32.to_be_bytes());
-    test_data.extend_from_slice(&9876543210i64.to_be_bytes());
-    test_data.extend_from_slice(&3.14f32.to_be_bytes());
-    test_data.extend_from_slice(&2.718281828f64.to_be_bytes());
+    test_data.extend_from_slice(&9_876_543_210_i64.to_be_bytes());
+    test_data.extend_from_slice(&std::f32::consts::PI.to_be_bytes());
+    test_data.extend_from_slice(&std::f64::consts::E.to_be_bytes());
 
     c.bench_function("nbt_read_i16", |b| {
         b.iter(|| {
             let mut reader = NbtReader::new(black_box(&test_data));
-            reader.read_i16_be().unwrap()
+            reader.read_i16_be().expect("read i16")
         });
     });
 
     c.bench_function("nbt_read_i32", |b| {
         b.iter(|| {
             let mut reader = NbtReader::new(black_box(&test_data[2..]));
-            reader.read_i32_be().unwrap()
+            reader.read_i32_be().expect("read i32")
         });
     });
 
     c.bench_function("nbt_read_i64", |b| {
         b.iter(|| {
             let mut reader = NbtReader::new(black_box(&test_data[6..]));
-            reader.read_i64_be().unwrap()
+            reader.read_i64_be().expect("read i64")
         });
     });
 
     c.bench_function("nbt_read_f32", |b| {
         b.iter(|| {
             let mut reader = NbtReader::new(black_box(&test_data[14..]));
-            reader.read_f32_be().unwrap()
+            reader.read_f32_be().expect("read f32")
         });
     });
 
     c.bench_function("nbt_read_f64", |b| {
         b.iter(|| {
             let mut reader = NbtReader::new(black_box(&test_data[18..]));
-            reader.read_f64_be().unwrap()
+            reader.read_f64_be().expect("read f64")
         });
     });
 }
 
 fn bench_nbt_skip_operations(c: &mut Criterion) {
-    let region_data = match mmap_region(&PathBuf::from("benches/test_data"), 1) {
-        Ok(data) => data,
-        Err(_) => return,
+    let Ok(region_data) = mmap_region(&PathBuf::from("benches/test_data"), 1) else {
+        return;
     };
 
     let compression = region_data.compression;
@@ -135,12 +136,13 @@ fn bench_nbt_skip_operations(c: &mut Criterion) {
             let mut reader = NbtReader::new(black_box(&chunk_data));
 
             // Read root tag
-            let tag_type = NbtTag::from_u8(reader.read_u8().unwrap()).unwrap();
+            let tag_type =
+                NbtTag::from_u8(reader.read_u8().expect("read tag byte")).expect("parse tag");
             assert_eq!(tag_type, NbtTag::Compound);
-            reader.skip_string().unwrap();
+            reader.skip_string().expect("skip root name");
 
             // Skip the entire compound
-            reader.skip_compound().unwrap()
+            reader.skip_compound().expect("skip compound");
         });
     });
 }

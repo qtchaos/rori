@@ -5,3 +5,7 @@ perf.*
 STATS.md
 .cargo/config.local.toml
 benches/test_write
+.SRCINFO
+PKGBUILD
+scripts
+.agents

@@ -1,35 +1,16 @@
 use std::io::ErrorKind;
 
-/// Branch prediction hints for hot paths
-#[inline(always)]
-#[cold]
-const fn cold() {}
-
-#[inline(always)]
-const fn likely(b: bool) -> bool {
-    if !b {
-        cold();
-    }
-    b
-}
-
-#[inline(always)]
-const fn unlikely(b: bool) -> bool {
-    if b {
-        cold();
-    }
-    b
-}
+use memchr::memmem;
 
 // Const error messages to avoid allocations in hot paths
 pub const ERR_NEGATIVE_ARRAY: &str = "Negative array length";
 pub const ERR_NEGATIVE_LIST: &str = "Negative list length";
 pub const ERR_SIZE_OVERFLOW: &str = "Size overflow";
-pub const ERR_UNEXPECTED_TYPE: &str = "Field has unexpected type";
 pub const ERR_NOT_COMPOUND: &str = "Root tag is not a compound";
 pub const ERR_UNKNOWN_TAG: &str = "Unknown NBT tag type";
 pub const ERR_NOT_FOUND: &str = "Field not found";
 const ERR_UNEXPECTED_EOF: &str = "unexpected EOF while parsing NBT";
+pub(crate) const INHABITED_TIME_TAG: &[u8] = b"\x04\x00\x0dInhabitedTime";
 
 #[derive(Debug)]
 pub enum NbtError {
@@ -140,13 +121,12 @@ impl<'a> NbtReader<'a> {
 
     #[inline(always)]
     pub fn read_u8(&mut self) -> Result<u8, NbtError> {
-        if likely(!self.data.is_empty()) {
-            let byte = unsafe { *self.data.get_unchecked(0) };
-            self.data = unsafe { self.data.get_unchecked(1..) };
-            Ok(byte)
-        } else {
-            Err(eof_error())
+        if self.data.is_empty() {
+            return Err(eof_error());
         }
+        let byte = unsafe { *self.data.get_unchecked(0) };
+        self.data = unsafe { self.data.get_unchecked(1..) };
+        Ok(byte)
     }
 
     #[inline]
@@ -156,7 +136,7 @@ impl<'a> NbtReader<'a> {
 
     #[inline(always)]
     pub fn read_u16_be(&mut self) -> Result<u16, NbtError> {
-        if likely(self.data.len() >= 2) {
+        if self.data.len() >= 2 {
             // Use unaligned read for better performance on modern CPUs
             let v =
                 unsafe { u16::from_be(std::ptr::read_unaligned(self.data.as_ptr().cast::<u16>())) };
@@ -242,7 +222,7 @@ impl<'a> NbtReader<'a> {
 
     #[inline(always)]
     pub fn skip_bytes(&mut self, count: usize) -> Result<(), NbtError> {
-        if likely(self.data.len() >= count) {
+        if self.data.len() >= count {
             self.data = unsafe { self.data.get_unchecked(count..) };
             Ok(())
         } else {
@@ -378,7 +358,7 @@ impl<'a> NbtReader<'a> {
 
             let tag_byte = self.read_u8()?;
             // End tag is rare in the middle of compound, common at the end
-            if unlikely(tag_byte == 0) {
+            if tag_byte == 0 {
                 break;
             }
             let tag_type = NbtTag::from_u8(tag_byte)?;
@@ -484,5 +464,19 @@ pub fn get_inhabited_time(chunk_data: &[u8]) -> Result<TimeResult, NbtError> {
         Ok(TimeResult { time: Some(time) })
     } else {
         Err(NbtError::InvalidFormat(ERR_NOT_FOUND.into()))
+    }
+}
+
+#[inline]
+#[must_use]
+pub fn find_inhabited_time_fast(chunk_data: &[u8]) -> Option<TimeResult> {
+    let value_start = memmem::find(chunk_data, INHABITED_TIME_TAG)? + INHABITED_TIME_TAG.len();
+    let value = chunk_data.get(value_start..value_start + 8)?;
+    let time = i64::from_be_bytes(value.try_into().ok()?);
+
+    if time >= 0 {
+        Some(TimeResult { time: Some(time) })
+    } else {
+        None
     }
 }
