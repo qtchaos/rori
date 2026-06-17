@@ -1,4 +1,5 @@
 use crate::ProcessError;
+use crate::SECTOR_SIZE;
 use crate::nbt::{TimeResult, find_inhabited_time_fast, get_inhabited_time};
 use crate::timing::StageTimings;
 use crate::{Chunk, ChunkMetadata, REGION_SIZE, Region};
@@ -12,9 +13,6 @@ use std::fs;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-
-/// Region file sector size in bytes
-const SECTOR_SIZE: usize = 4096;
 
 const DECOMPRESS_CHUNK_SIZE: usize = 512;
 const STREAM_SCAN_CHUNK_SIZE: usize = 16 * 1024;
@@ -442,7 +440,8 @@ fn scan_chunk(
     timings_enabled: bool,
 ) -> ChunkScanResult {
     let (time_res, mut timings) =
-        process_chunk_time(raw_region, meta, DECOMPRESS_CHUNK_SIZE, timings_enabled).unwrap_or_else(|| {
+        process_chunk_time(raw_region, meta, DECOMPRESS_CHUNK_SIZE, timings_enabled)
+            .unwrap_or_else(|| {
                 let timings = StageTimings {
                     scan_failures: 1,
                     ..StageTimings::default()
@@ -486,7 +485,7 @@ fn process_chunk_time(
 ) -> Option<(TimeResult, StageTimings)> {
     let mut timings = StageTimings::default();
     let compressed_data = &raw_region[meta.start..meta.end];
-    // ponytail: inlined should_try_partial_probe, add const fn back if multiple callers appear
+
     let try_partial = bite_size > 0
         && (!matches!(meta.compression, CompressionType::Zlib)
             || compressed_data.len() <= PARTIAL_COMPRESSED_SIZE_LIMIT);
@@ -521,7 +520,12 @@ fn process_chunk_time(
 
     // If get_inhabited_time failed (Err), we fall through
 
-    match stream_find_inhabited_time(meta.compression, compressed_data, timings_enabled, &mut timings) {
+    match stream_find_inhabited_time(
+        meta.compression,
+        compressed_data,
+        timings_enabled,
+        &mut timings,
+    ) {
         Ok(Some(stats)) => {
             timings.stream_hits += 1;
             return Some((stats, timings));
@@ -563,22 +567,12 @@ fn stream_find_inhabited_time(
     timings: &mut StageTimings,
 ) -> Result<Option<TimeResult>, ProcessError> {
     match compression {
-        CompressionType::Zlib => stream_decompress_inner(
-            compressed_data,
-            0,
-            true,
-            timings_enabled,
-            timings,
-        ),
+        CompressionType::Zlib => {
+            stream_decompress_inner(compressed_data, 0, true, timings_enabled, timings)
+        }
         CompressionType::GZip => {
             let offset = gzip_body_offset(compressed_data)?;
-            stream_decompress_inner(
-                compressed_data,
-                offset,
-                false,
-                timings_enabled,
-                timings,
-            )
+            stream_decompress_inner(compressed_data, offset, false, timings_enabled, timings)
         }
     }
 }
@@ -590,7 +584,11 @@ fn stream_decompress_inner(
     timings_enabled: bool,
     timings: &mut StageTimings,
 ) -> Result<Option<TimeResult>, ProcessError> {
-    let stream_cell = if is_zlib { &STREAM_ZLIB } else { &STREAM_DEFLATE };
+    let stream_cell = if is_zlib {
+        &STREAM_ZLIB
+    } else {
+        &STREAM_DEFLATE
+    };
 
     stream_cell.with(|stream_cell| {
         STREAM_BUF.with(|buf_cell| {
@@ -601,6 +599,7 @@ fn stream_decompress_inner(
             buf.resize(STREAM_SCAN_LIMIT + STREAM_SCAN_OVERLAP, 0);
             let out = &mut buf[..];
             let mut written = 0usize;
+            let mut prev_written = 0usize;
             let mut first = true;
 
             loop {
@@ -649,11 +648,13 @@ fn stream_decompress_inner(
 
                 if produced > 0 {
                     let nbt_start = timings_enabled.then(Instant::now);
-                    let search_end = written;
-                    let found_time = find_inhabited_time_fast(&out[..search_end]);
+                    // Only scan new bytes + overlap from the previous block,
+                    let scan_start = prev_written.saturating_sub(STREAM_SCAN_OVERLAP);
+                    let found_time = find_inhabited_time_fast(&out[scan_start..written]);
                     if let Some(start) = nbt_start {
                         timings.stream_nbt += start.elapsed();
                     }
+                    prev_written = written;
 
                     if found_time.is_some() {
                         return Ok(found_time);
@@ -684,7 +685,9 @@ fn gzip_body_offset(data: &[u8]) -> Result<usize, ProcessError> {
     // Optional: extra field (FEXTRA)
     if flags & 0x04 != 0 {
         if offset + 2 > data.len() {
-            return Err(ProcessError::ChunkError("Truncated gzip FEXTRA length".into()));
+            return Err(ProcessError::ChunkError(
+                "Truncated gzip FEXTRA length".into(),
+            ));
         }
         let xlen = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
         offset += 2 + xlen;
@@ -708,7 +711,9 @@ fn gzip_body_offset(data: &[u8]) -> Result<usize, ProcessError> {
         offset += 2;
     }
     if offset >= data.len() {
-        return Err(ProcessError::ChunkError("GZip header extends past data".into()));
+        return Err(ProcessError::ChunkError(
+            "GZip header extends past data".into(),
+        ));
     }
     Ok(offset)
 }
@@ -759,8 +764,7 @@ fn parse_header_slot(data: &[u8], x: usize, z: usize) -> Option<ChunkMetadata> {
 
     let len_bytes = &data[byte_offset..byte_offset + 4];
     let exact_len =
-        u32::from_be_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]])
-            as usize;
+        u32::from_be_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
 
     if exact_len == 0 || byte_offset + 4 + exact_len > data.len() {
         return None;

@@ -15,7 +15,7 @@ enum FormatArg {
 }
 
 impl FormatArg {
-    const fn to_option(self) -> Option<WorldFormat> {
+    const fn into_world_format(self) -> Option<WorldFormat> {
         match self {
             Self::Auto => None,
             Self::Legacy => Some(WorldFormat::Legacy),
@@ -139,7 +139,7 @@ fn main() {
 
     let dimensions: Vec<Dimension> = args.dimension.into();
 
-    let world_format = args.format.to_option();
+    let world_format = args.format.into_world_format();
     let result = match process_world_with_format(&args.path, &config, &dimensions, world_format) {
         Ok(result) => result,
         Err(e) => {
@@ -195,8 +195,7 @@ fn main() {
         info!("Deleted regions: {}", result.deleted_regions);
     }
 
-    let chunks_per_second =
-        f64::from(result.total_chunk_stats.total) / duration.as_secs_f64();
+    let chunks_per_second = f64::from(result.total_chunk_stats.total) / duration.as_secs_f64();
 
     info!("Completed in {duration:.2?}, {chunks_per_second:.0} chunks per second");
 }

@@ -5,7 +5,7 @@ pub mod timing;
 use crate::decompress::{
     CompressionType, MappedRegion, ScannedChunk, anvil_region, mmap_region_for_processing,
 };
-use crate::timing::{log_timing_summary, StageTimings};
+use crate::timing::{StageTimings, log_timing_summary};
 
 use fastanvil::CompressionScheme;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -21,7 +21,7 @@ use std::{
 /// Minecraft regions are 32x32 chunks
 const REGION_SIZE: usize = 32;
 /// Region file sector size in bytes
-const SECTOR_SIZE: usize = 4096;
+pub(crate) const SECTOR_SIZE: usize = 4096;
 
 /// Represents a Minecraft dimension
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +63,6 @@ impl Dimension {
             Self::End => "End",
         }
     }
-
 }
 
 /// Configuration options for processing Minecraft region files.
@@ -209,8 +208,8 @@ impl Region {
 /// * `path` - Path to the world directory or specific region directory
 /// * `config` - Processing configuration options
 /// * `dimensions` - Which dimensions to process
+///
 /// Detect the world storage format by probing known directory layouts.
-/// Returns `None` if the path doesn't look like a world directory.
 #[must_use]
 pub fn detect_world_format(path: &Path) -> Option<WorldFormat> {
     // Check modern layout first (more specific)
@@ -221,10 +220,7 @@ pub fn detect_world_format(path: &Path) -> Option<WorldFormat> {
         return Some(WorldFormat::Modern);
     }
     // Check legacy layout
-    if path.join("region").exists()
-        || path.join("DIM-1").exists()
-        || path.join("DIM1").exists()
-    {
+    if path.join("region").exists() || path.join("DIM-1").exists() || path.join("DIM1").exists() {
         return Some(WorldFormat::Legacy);
     }
     None
@@ -255,10 +251,30 @@ pub fn process_world_with_format(
             WorldFormat::Legacy => "Processing as legacy world directory",
             WorldFormat::Modern => "Processing as modern world directory",
         };
-        process_dimensions(path, config, dimensions, |root, dim| root.join(dim.region_path(format)), context)
+        process_dimensions(
+            path,
+            config,
+            dimensions,
+            |root, dim| root.join(dim.region_path(format)),
+            context,
+        )
     } else if is_server_root {
         // Process as Spigot/Bukkit/Paper server root (world_nether, world_the_end layout)
-        let level_name = parse_level_name(path);
+        let level_name = {
+            let props_path = path.join("server.properties");
+            let contents = fs::read_to_string(&props_path).unwrap_or_default();
+            let mut name = String::from("world");
+            for line in contents.lines() {
+                if let Some(value) = line.strip_prefix("level-name=") {
+                    let trimmed = value.trim().trim_matches('"');
+                    if !trimmed.is_empty() {
+                        name = trimmed.to_string();
+                        break;
+                    }
+                }
+            }
+            name
+        };
         process_dimensions(
             path,
             config,
@@ -355,24 +371,6 @@ fn process_dimensions(
     })
 }
 
-/// Read the `level-name` value from a `server.properties` file inside `server_path`.
-/// Falls back to `"world"` when the file is missing or the key is not found.
-fn parse_level_name(server_path: &Path) -> String {
-    let props_path = server_path.join("server.properties");
-    let Ok(contents) = fs::read_to_string(&props_path) else {
-        return String::from("world");
-    };
-    for line in contents.lines() {
-        if let Some(value) = line.strip_prefix("level-name=") {
-            let name = value.trim().trim_matches('"');
-            if !name.is_empty() {
-                return name.to_string();
-            }
-        }
-    }
-    String::from("world")
-}
-
 /// Internal result type for processing a single directory
 #[derive(Debug)]
 struct DirectoryResult {
@@ -393,7 +391,15 @@ fn process_directory(
     dimension: Dimension,
 ) -> Result<DirectoryResult, ProcessError> {
     let start = Instant::now();
-    let region_files = find_region_files(path)?;
+    let region_files: Vec<PathBuf> = fs::read_dir(path)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("mca"))
+        })
+        .collect();
     debug!(
         "Found {} region files in {} (took {:.2?})",
         region_files.len(),
@@ -480,23 +486,6 @@ fn process_directory(
     })
 }
 
-/// Find all .mca (Minecraft Anvil) region files in a directory.
-fn find_region_files(path: &Path) -> Result<Vec<PathBuf>, ProcessError> {
-    let entries = fs::read_dir(path)?;
-
-    let regions: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("mca"))
-        })
-        .collect();
-
-    Ok(regions)
-}
-
 /// Process a single Minecraft region file, apply file system changes and return some information about it.
 pub fn process_region(region_path: &PathBuf, config: &Conf) -> Result<Region, ProcessError> {
     trace!("Processing region: {}", region_path.display());
@@ -558,7 +547,14 @@ fn process_mapped_region(
     } = mapped_region;
 
     let fs_start = log::log_enabled!(log::Level::Debug).then(Instant::now);
-    if should_rewrite_chunks(&region, config) {
+    let total_chunks = region.stats.chunks.total;
+    let inhabited_chunks = region.stats.chunks.inhabited;
+    if !config.dry_run
+        && !config.delete_regions
+        && total_chunks > 0
+        && inhabited_chunks > 0
+        && total_chunks > inhabited_chunks
+    {
         let deleteable_chunks = region
             .stats
             .chunks
@@ -599,17 +595,6 @@ fn process_mapped_region(
     Ok(region)
 }
 
-const fn should_rewrite_chunks(data: &Region, config: &Conf) -> bool {
-    let total_chunks = data.stats.chunks.total;
-    let inhabited_chunks = data.stats.chunks.inhabited;
-
-    !config.dry_run
-        && !config.delete_regions
-        && total_chunks > 0
-        && inhabited_chunks > 0
-        && total_chunks > inhabited_chunks
-}
-
 /// Decides whether to delete the file, rewrite it, or do nothing based on stats.
 fn apply_filesystem_changes(
     region_path: &Path,
@@ -645,7 +630,12 @@ fn apply_filesystem_changes(
         if !config.dry_run && deleteable_chunks > 0 {
             if has_chunks {
                 // Some chunks meet threshold - rewrite to remove the others
-                rewrite_region(region_path, &data.chunks, config.inhabited_time_threshold, data.compression)?;
+                rewrite_region(
+                    region_path,
+                    &data.chunks,
+                    config.inhabited_time_threshold,
+                    data.compression,
+                )?;
                 trace!(
                     "Deleted {} chunks from {}",
                     deleteable_chunks,
@@ -695,7 +685,10 @@ fn rewrite_region(
                     && let Err(e) = new_region.write_compressed_chunk(
                         x,
                         z,
-                        compression_scheme(compression),
+                        match compression {
+                            CompressionType::GZip => CompressionScheme::Gzip,
+                            CompressionType::Zlib => CompressionScheme::Zlib,
+                        },
                         data.as_slice(),
                     )
                 {
@@ -715,9 +708,7 @@ fn rewrite_region_from_mmap(
     raw_region: &[u8],
     inhabited_time_threshold: u32,
 ) -> Result<(), ProcessError> {
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(region_path)?;
+    let file = std::fs::OpenOptions::new().write(true).open(region_path)?;
 
     let mut header = [0u8; 8192];
     let mut timestamps = [0u8; 4096];
@@ -740,9 +731,8 @@ fn rewrite_region_from_mmap(
         })?;
 
         let exact_len = compressed.len() + 1;
-        let exact_len_u32 = u32::try_from(exact_len).map_err(|_| {
-            ProcessError::ChunkError("Chunk payload too large".into())
-        })?;
+        let exact_len_u32 = u32::try_from(exact_len)
+            .map_err(|_| ProcessError::ChunkError("Chunk payload too large".into()))?;
         let sector_count = exact_len.div_ceil(SECTOR_SIZE);
         if sector_count > 255 {
             warn!("Chunk ({}, {}) too large, skipping", meta.x, meta.z);
@@ -750,7 +740,10 @@ fn rewrite_region_from_mmap(
         }
 
         body.extend_from_slice(&exact_len_u32.to_be_bytes());
-        body.push(compression_byte(meta.compression));
+        body.push(match meta.compression {
+            CompressionType::GZip => 1,
+            CompressionType::Zlib => 2,
+        });
         body.extend_from_slice(compressed);
         body.resize(body.len() + (sector_count * SECTOR_SIZE - exact_len), 0);
 
@@ -774,23 +767,10 @@ fn rewrite_region_from_mmap(
     file.sync_data()?;
 
     // Truncate tail, idempotent, safe to replay after a crash.
-    file.set_len(u64::try_from(end).map_err(|_| {
-        ProcessError::RegionError("Region file too large to truncate".into())
-    })?)?;
+    file.set_len(
+        u64::try_from(end)
+            .map_err(|_| ProcessError::RegionError("Region file too large to truncate".into()))?,
+    )?;
 
     Ok(())
-}
-
-const fn compression_byte(compression: CompressionType) -> u8 {
-    match compression {
-        CompressionType::GZip => 1,
-        CompressionType::Zlib => 2,
-    }
-}
-
-const fn compression_scheme(compression: CompressionType) -> CompressionScheme {
-    match compression {
-        CompressionType::GZip => CompressionScheme::Gzip,
-        CompressionType::Zlib => CompressionScheme::Zlib,
-    }
 }

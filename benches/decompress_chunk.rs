@@ -38,7 +38,11 @@ fn bench_decompress_full(c: &mut Criterion) {
             BenchmarkId::from_parameter(&name),
             compressed_data,
             |b, data| {
-                b.iter(|| black_box(decompress(compression, black_box(data)).expect("bench decompress_full")));
+                b.iter(|| {
+                    black_box(
+                        decompress(compression, black_box(data)).expect("bench decompress_full"),
+                    )
+                });
             },
         );
     }
@@ -72,7 +76,8 @@ fn bench_decompress_partial(c: &mut Criterion) {
                 |b, data| {
                     b.iter(|| {
                         black_box(
-                            decompress_partial(compression, black_box(data), partial_size).expect("bench decompress_partial"),
+                            decompress_partial(compression, black_box(data), partial_size)
+                                .expect("bench decompress_partial"),
                         )
                     });
                 },
@@ -105,7 +110,12 @@ fn bench_partial_vs_full_comparison(c: &mut Criterion) {
             BenchmarkId::new("full", &name),
             compressed_data,
             |b, data| {
-                b.iter(|| black_box(decompress(compression, black_box(data)).expect("bench partial_vs_full: full")));
+                b.iter(|| {
+                    black_box(
+                        decompress(compression, black_box(data))
+                            .expect("bench partial_vs_full: full"),
+                    )
+                });
             },
         );
 
@@ -115,7 +125,10 @@ fn bench_partial_vs_full_comparison(c: &mut Criterion) {
             compressed_data,
             |b, data| {
                 b.iter(|| {
-                    black_box(decompress_partial(compression, black_box(data), 512).expect("bench partial_vs_full: partial"))
+                    black_box(
+                        decompress_partial(compression, black_box(data), 512)
+                            .expect("bench partial_vs_full: partial"),
+                    )
                 });
             },
         );

@@ -106,15 +106,18 @@ pub(crate) fn timing_breakdown(timings: StageTimings, chunk_count: u32) -> Strin
     let chunk_cpu = timings.chunk_cpu_total();
     let decompress = timings.decompress_total();
     let nbt = timings.nbt_total();
-    // ponytail: inlined pct/count_pct/avg_bytes, add helpers back if reused elsewhere
     let w = wall.as_secs_f64();
     let c = chunk_cpu.as_secs_f64();
-    // ponytail: callers guarantee wall/chunk_cpu/chunk_count > 0
     let pct = |part: Duration| part.as_secs_f64() / w * 100.0;
     let cpct = |part: Duration| part.as_secs_f64() / c * 100.0;
     let cnt_pct = |part: u32| f64::from(part) / f64::from(chunk_count) * 100.0;
     let stream_out_avg = timings.stream_output_bytes
-        / u64::from(timings.stream_hits.saturating_add(timings.stream_misses).max(1));
+        / u64::from(
+            timings
+                .stream_hits
+                .saturating_add(timings.stream_misses)
+                .max(1),
+        );
 
     format!(
         concat!(

@@ -45,7 +45,8 @@ fn bench_nbt_reader_search(c: &mut Criterion) {
             let mut reader = NbtReader::new(black_box(&chunk_data));
 
             // Read root compound tag
-            let tag_type = NbtTag::from_u8(reader.read_u8().expect("read tag byte")).expect("parse tag");
+            let tag_type =
+                NbtTag::from_u8(reader.read_u8().expect("read tag byte")).expect("parse tag");
             assert_eq!(tag_type, NbtTag::Compound);
 
             // Skip root tag name
@@ -135,7 +136,8 @@ fn bench_nbt_skip_operations(c: &mut Criterion) {
             let mut reader = NbtReader::new(black_box(&chunk_data));
 
             // Read root tag
-            let tag_type = NbtTag::from_u8(reader.read_u8().expect("read tag byte")).expect("parse tag");
+            let tag_type =
+                NbtTag::from_u8(reader.read_u8().expect("read tag byte")).expect("parse tag");
             assert_eq!(tag_type, NbtTag::Compound);
             reader.skip_string().expect("skip root name");
 
