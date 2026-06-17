@@ -10,5 +10,5 @@ fi
 mkdir -p benches/test_write
 cp -r benches/test_data/* benches/test_write
 
-cargo flamegraph --bin rori --dev -i --flamechart -- "benches/test_write"
+cargo flamegraph --bin rori --dev -i --flamechart -- "benches/test_write" -v
 xdg-open flamegraph.svg

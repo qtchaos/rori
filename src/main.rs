@@ -2,7 +2,27 @@ use std::{path::PathBuf, process};
 
 use clap::{Parser, ValueEnum};
 use log::{debug, error, info, warn};
-use rori::{Conf, Dimension, process_world};
+use rori::{Conf, Dimension, WorldFormat, process_world_with_format};
+
+#[derive(Debug, Clone, ValueEnum)]
+enum FormatArg {
+    /// Auto-detect world format
+    Auto,
+    /// Pre-1.26 legacy layout (region/, DIM-1/, DIM1/)
+    Legacy,
+    /// 1.26+ modern layout (dimensions/minecraft/.../region/)
+    Modern,
+}
+
+impl FormatArg {
+    const fn to_option(self) -> Option<WorldFormat> {
+        match self {
+            Self::Auto => None,
+            Self::Legacy => Some(WorldFormat::Legacy),
+            Self::Modern => Some(WorldFormat::Modern),
+        }
+    }
+}
 
 #[derive(Debug, Clone, ValueEnum)]
 enum DimensionArg {
@@ -42,7 +62,7 @@ struct Args {
     verbose: u8,
 
     /// Number of threads to use for parallel processing
-    #[arg(short, long, default_value_t = num_cpus::get())]
+    #[arg(short, long, default_value_t = std::thread::available_parallelism().map_or(1, std::num::NonZero::get))]
     threads: usize,
 
     /// The cumulative number of ticks players have been in a chunk.
@@ -61,6 +81,10 @@ struct Args {
     /// Which dimension(s) to process. Only applies if path is a world directory.
     #[arg(short, long, value_enum, default_value = "all")]
     dimension: DimensionArg,
+
+    /// World storage format. 'auto' detects based on directory layout.
+    #[arg(long, value_enum, default_value = "auto")]
+    format: FormatArg,
 }
 
 fn main() {
@@ -115,7 +139,8 @@ fn main() {
 
     let dimensions: Vec<Dimension> = args.dimension.into();
 
-    let result = match process_world(&args.path, &config, &dimensions) {
+    let world_format = args.format.to_option();
+    let result = match process_world_with_format(&args.path, &config, &dimensions, world_format) {
         Ok(result) => result,
         Err(e) => {
             error!("Processing failed: {e}");
@@ -171,7 +196,7 @@ fn main() {
     }
 
     let chunks_per_second =
-        result.total_chunk_stats.total as f64 / duration.as_millis() as f64 * 1000.0;
+        f64::from(result.total_chunk_stats.total) / duration.as_secs_f64();
 
     info!("Completed in {duration:.2?}, {chunks_per_second:.0} chunks per second");
 }

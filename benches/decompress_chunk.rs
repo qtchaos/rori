@@ -1,3 +1,4 @@
+#![allow(clippy::significant_drop_tightening)]
 use std::path::PathBuf;
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
@@ -22,7 +23,7 @@ fn bench_decompress_full(c: &mut Criterion) {
         return;
     };
 
-    let Some(Some(chunk)) = region.chunks.get(0).and_then(|row| row.get(0)) else {
+    let Some(Some(chunk)) = region.chunks.first().and_then(|row| row.first()) else {
         eprintln!("Skipping bench_decompress_full: no chunks in test data");
         return;
     };
@@ -37,7 +38,7 @@ fn bench_decompress_full(c: &mut Criterion) {
             BenchmarkId::from_parameter(&name),
             compressed_data,
             |b, data| {
-                b.iter(|| black_box(decompress(compression, black_box(data)).unwrap()));
+                b.iter(|| black_box(decompress(compression, black_box(data)).expect("bench decompress_full")));
             },
         );
     }
@@ -50,7 +51,7 @@ fn bench_decompress_partial(c: &mut Criterion) {
         return;
     };
 
-    let Some(Some(chunk)) = region.chunks.get(0).and_then(|row| row.get(0)) else {
+    let Some(Some(chunk)) = region.chunks.first().and_then(|row| row.first()) else {
         eprintln!("Skipping bench_decompress_partial: no chunks in test data");
         return;
     };
@@ -59,7 +60,7 @@ fn bench_decompress_partial(c: &mut Criterion) {
     let partial_sizes = [512, 1024, 2048, 4096, 8192];
 
     for partial_size in partial_sizes {
-        let mut group = c.benchmark_group(format!("decompress_partial_{}b", partial_size));
+        let mut group = c.benchmark_group(format!("decompress_partial_{partial_size}b"));
 
         if let Some(ref compressed_data) = chunk.data {
             let name = format!("chunk_{}_{}", 0, 0);
@@ -71,7 +72,7 @@ fn bench_decompress_partial(c: &mut Criterion) {
                 |b, data| {
                     b.iter(|| {
                         black_box(
-                            decompress_partial(compression, black_box(data), partial_size).unwrap(),
+                            decompress_partial(compression, black_box(data), partial_size).expect("bench decompress_partial"),
                         )
                     });
                 },
@@ -88,7 +89,7 @@ fn bench_partial_vs_full_comparison(c: &mut Criterion) {
         return;
     };
 
-    let Some(Some(chunk)) = region.chunks.get(0).and_then(|row| row.get(0)) else {
+    let Some(Some(chunk)) = region.chunks.first().and_then(|row| row.first()) else {
         eprintln!("Skipping bench_decompress_partial: no chunks in test data");
         return;
     };
@@ -104,7 +105,7 @@ fn bench_partial_vs_full_comparison(c: &mut Criterion) {
             BenchmarkId::new("full", &name),
             compressed_data,
             |b, data| {
-                b.iter(|| black_box(decompress(compression, black_box(data)).unwrap()));
+                b.iter(|| black_box(decompress(compression, black_box(data)).expect("bench partial_vs_full: full")));
             },
         );
 
@@ -114,7 +115,7 @@ fn bench_partial_vs_full_comparison(c: &mut Criterion) {
             compressed_data,
             |b, data| {
                 b.iter(|| {
-                    black_box(decompress_partial(compression, black_box(data), 512).unwrap())
+                    black_box(decompress_partial(compression, black_box(data), 512).expect("bench partial_vs_full: partial"))
                 });
             },
         );

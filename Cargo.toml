@@ -1,6 +1,6 @@
 [package]
 name = "rori"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 readme = "README.md"
 description = "A highly multithreaded tool for deleting inactive chunks or regions in Minecraft worlds, focusing on performance and efficiency, designed to be used for large-scale world management."
@@ -11,18 +11,23 @@ authors = ["chaos"]
 
 [dev-dependencies]
 criterion = { package = "codspeed-criterion-compat", version = "3.0.5", default-features = false }
-proptest = { version = "1.5", features = ["std"], default-features = false }
 
 [dependencies]
 clap = { version = "4.5.42", features = ["derive"] }
 env_logger = { version = "0.11.8", default-features = false }
 fastanvil = { version = "0.31.0", default-features = false }
+flate2 = { version = "1.1.5", default-features = false }
 libdeflater = "1.22"
 indicatif = { version = "0.18.0", default-features = false }
 log = "0.4.27"
-num_cpus = "1.17.0"
+memchr = "2.7.6"
 rayon = "1.10.0"
 memmap2 = "0.6.2"
+
+[features]
+default = ["stream-zlib-rs"]
+stream-miniz = ["flate2/rust_backend"]
+stream-zlib-rs = ["flate2/zlib-rs"]
 
 [profile.dev]
 debug = "line-tables-only"

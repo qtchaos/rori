@@ -1,5 +1,7 @@
 use std::io::ErrorKind;
 
+use memchr::memmem;
+
 /// Branch prediction hints for hot paths
 #[inline(always)]
 #[cold]
@@ -30,6 +32,7 @@ pub const ERR_NOT_COMPOUND: &str = "Root tag is not a compound";
 pub const ERR_UNKNOWN_TAG: &str = "Unknown NBT tag type";
 pub const ERR_NOT_FOUND: &str = "Field not found";
 const ERR_UNEXPECTED_EOF: &str = "unexpected EOF while parsing NBT";
+pub(crate) const INHABITED_TIME_TAG: &[u8] = b"\x04\x00\x0dInhabitedTime";
 
 #[derive(Debug)]
 pub enum NbtError {
@@ -484,5 +487,19 @@ pub fn get_inhabited_time(chunk_data: &[u8]) -> Result<TimeResult, NbtError> {
         Ok(TimeResult { time: Some(time) })
     } else {
         Err(NbtError::InvalidFormat(ERR_NOT_FOUND.into()))
+    }
+}
+
+#[inline]
+#[must_use]
+pub fn find_inhabited_time_fast(chunk_data: &[u8]) -> Option<TimeResult> {
+    let value_start = memmem::find(chunk_data, INHABITED_TIME_TAG)? + INHABITED_TIME_TAG.len();
+    let value = chunk_data.get(value_start..value_start + 8)?;
+    let time = i64::from_be_bytes(value.try_into().ok()?);
+
+    if time >= 0 {
+        Some(TimeResult { time: Some(time) })
+    } else {
+        None
     }
 }
